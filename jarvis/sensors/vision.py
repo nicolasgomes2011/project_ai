@@ -5,6 +5,7 @@ import time
 from typing import Optional, Dict
 
 from jarvis.config import SCREEN_CAPTURE_FPS, OCR_LANGUAGES, TESSERACT_CMD
+import os
 
 
 class VisionSensor:
@@ -36,9 +37,12 @@ class VisionSensor:
     def _setup_tesseract(self) -> None:
         try:
             import pytesseract
-            import os
             if os.path.exists(TESSERACT_CMD):
                 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+            # Configura pasta de dados de idioma (tessdata do usuário)
+            tessdata = os.getenv("TESSDATA_PREFIX", "")
+            if tessdata and os.path.isdir(tessdata):
+                os.environ["TESSDATA_PREFIX"] = tessdata
         except ImportError:
             print("[Vision] pytesseract não instalado — OCR desativado.")
             self._ocr_enabled = False
