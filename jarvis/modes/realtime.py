@@ -12,9 +12,11 @@ from rich.panel import Panel
 
 from jarvis.core.agent import Agent
 from jarvis.core.memory import Memory
+from jarvis.core.profile import UserProfile
 from jarvis.sensors.audio import AudioSensor
 from jarvis.sensors.vision import VisionSensor
 from jarvis.sensors.system_ctx import SystemContext
+from jarvis.sensors.activity import ActivitySensor, ActivityState, ActivityType
 from jarvis.processing.stt import STTProcessor
 from jarvis.processing.tts import TTSProcessor
 from jarvis.observer.observer import Observer
@@ -54,6 +56,13 @@ class RealtimeMode:
         self.tts = TTSProcessor()
         self.observer = Observer()
         self.decision = DecisionEngine()
+
+        # Inteligência contextual e aprendizado persistente
+        self.profile: UserProfile = UserProfile.load()
+        self.activity_sensor: ActivitySensor = ActivitySensor()
+        self._current_activity: ActivityState = ActivityState(
+            type=ActivityType.UNKNOWN, confidence=0.0, details=""
+        )
 
         # Sensores opcionais
         self.audio_sensor: Optional[AudioSensor] = AudioSensor() if voice_enabled else None
@@ -176,6 +185,10 @@ class RealtimeMode:
             if should_flush:
                 await self._flush_annotation_buffer()
 
+        # --- Detecção de comando de aprendizado explícito ---
+        if await self._check_learn_command(text):
+            return  # Já tratado, não repassa ao agente
+
         # Jarvis responde normalmente independente do modo anotação
         await self._respond(text)
 
@@ -282,6 +295,46 @@ class RealtimeMode:
             console.print(f"[red][Anotação] Erro ao gravar no Doc: {e}[/red]")
 
     # ------------------------------------------------------------------ #
+    #  Aprendizado explícito                                               #
+    # ------------------------------------------------------------------ #
+
+    async def _check_learn_command(self, text: str) -> bool:
+        """
+        Detecta comandos explícitos de aprendizado e salva no perfil.
+        Retorna True se o texto é um comando de aprendizado (não deve ir para o agente).
+
+        Padrões detectados (texto deve COMEÇAR com um dos triggers):
+            "lembra que X", "anota que X", "guarda que X", "remember that X"
+        """
+        text_lower = text.strip().lower()
+        LEARN_TRIGGERS = [
+            "lembra que ", "lembra disso: ", "anota que ", "guarda que ",
+            "remember that ", "salva que ", "memoriza que ",
+        ]
+
+        matched_trigger = None
+        for trigger in LEARN_TRIGGERS:
+            if text_lower.startswith(trigger):
+                matched_trigger = trigger
+                break
+
+        if matched_trigger is None:
+            return False
+
+        # Extrai o conteúdo a aprender
+        content = text[len(matched_trigger):].strip()
+        if len(content) < 3:
+            return False
+
+        self.profile.add_insights([content])
+        self.profile.save()
+        self.memory.log_event("profile_learn", {"insight": content})
+
+        console.print(f"[magenta][Perfil][/magenta] Aprendido: {content}")
+        await self.tts.speak_async("Anotado! Vou lembrar disso.")
+        return True
+
+    # ------------------------------------------------------------------ #
     #  Geração de resposta                                                 #
     # ------------------------------------------------------------------ #
 
@@ -299,6 +352,22 @@ class RealtimeMode:
                 context["screen_text"] = self.vision_sensor.get_last_ocr()
             if proactive_context:
                 context.update(proactive_context)
+
+            # --- Detecção de atividade atual ---
+            activity = self.activity_sensor.detect(
+                app_name=context.get("app_name", ""),
+                window_title=context.get("window_title", ""),
+                screen_text=context.get("screen_text", ""),
+                learned_apps=self.profile.learned_apps,
+            )
+            self._current_activity = activity
+            self.profile.update_activity(activity.type.value)
+            context["activity"] = activity.label()
+
+            # --- Perfil do usuário ---
+            profile_ctx = self.profile.get_context_for_llm()
+            if profile_ctx:
+                context["profile"] = profile_ctx
 
             # Chamada ao agente (bloqueante → thread pool)
             loop = asyncio.get_event_loop()
@@ -346,6 +415,7 @@ class RealtimeMode:
                 "app_name": self.system_ctx.get_context().get("app_name", ""),
                 "last_speech": self.memory.get_last_user_message(),
                 "elapsed_since_last_response": time.time() - self.memory.last_response_time,
+                "activity_type": self._current_activity.type.value,
             }
 
             events = self.observer.check(state)
@@ -389,6 +459,109 @@ class RealtimeMode:
     #  Shutdown                                                            #
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    #  Aprendizado automático — resumo de sessão                          #
+    # ------------------------------------------------------------------ #
+
+    def _summarize_session(self) -> None:
+        """
+        Gera um resumo da sessão via LLM e salva no perfil do usuário.
+        Chamado em background thread no shutdown — não bloqueia o encerramento.
+        Só executa se houver pelo menos SESSION_SUMMARY_MIN_EXCHANGES trocas.
+        Usa o modelo mais rápido disponível (llama-3.1-8b-instant no Groq).
+        """
+        exchange_count = self.memory.message_count // 2
+        if exchange_count < cfg.SESSION_SUMMARY_MIN_EXCHANGES:
+            print(f"[Profile] Sessão curta ({exchange_count} trocas) — resumo ignorado.")
+            self.profile.increment_session()
+            self.profile.save()
+            return
+
+        # Coleta histórico recente (últimas 20 trocas para não estourar tokens)
+        recent_messages = self.memory.get_messages_for_api()[-40:]
+        conversation_text = "\n".join(
+            f"{'Usuário' if m['role'] == 'user' else 'Jarvis'}: {m['content'][:300]}"
+            for m in recent_messages
+        )
+
+        summary_prompt = (
+            "Analise a conversa abaixo entre um usuário e seu assistente de IA pessoal Jarvis.\n"
+            "Extraia de 3 a 5 fatos CONCRETOS e ÚTEIS sobre o usuário que possam ajudar "
+            "o Jarvis em sessões futuras.\n\n"
+            "Foque em:\n"
+            "- O que o usuário está desenvolvendo/trabalhando atualmente\n"
+            "- Jogos que joga ou mencionou\n"
+            "- Problemas recorrentes que enfrenta\n"
+            "- Preferências de ferramentas, linguagens ou fluxos de trabalho\n"
+            "- Qualquer dado pessoal relevante que o usuário compartilhou explicitamente\n\n"
+            "NÃO inclua:\n"
+            "- Informações genéricas (\"o usuário usa um computador\")\n"
+            "- Respostas do Jarvis — apenas fatos sobre o USUÁRIO\n"
+            "- Suposições não baseadas na conversa\n\n"
+            "Formato: retorne APENAS uma lista de bullets começando com \"-\". "
+            "Máximo de 5 bullets.\n\n"
+            f"CONVERSA:\n{conversation_text}\n\nBULLETS:"
+        )
+
+        try:
+            from openai import OpenAI
+
+            if self.agent.provider == "groq":
+                client = OpenAI(
+                    base_url="https://api.groq.com/openai/v1",
+                    api_key=cfg.GROQ_API_KEY,
+                )
+                model = "llama-3.1-8b-instant"   # Rápido e barato — não usa a quota do 70B
+            elif self.agent.provider == "ollama":
+                client = OpenAI(
+                    base_url=f"{cfg.OLLAMA_HOST}/v1",
+                    api_key="ollama",
+                )
+                model = cfg.OLLAMA_MODEL
+            else:
+                # Anthropic: reutiliza agente diretamente
+                response_text = self.agent._chat_anthropic(summary_prompt)
+                bullets = self._parse_bullets(response_text)
+                self.profile.add_insights(bullets)
+                self.profile.increment_session()
+                self.profile.save()
+                print(f"[Profile] Sessão resumida: {len(bullets)} insight(s) salvos.")
+                return
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": summary_prompt}],
+                max_tokens=300,
+                temperature=0.3,
+            )
+            response_text = response.choices[0].message.content or ""
+            bullets = self._parse_bullets(response_text)
+            self.profile.add_insights(bullets)
+            self.profile.increment_session()
+            self.profile.save()
+            print(f"[Profile] Sessão resumida: {len(bullets)} insight(s) salvos.")
+
+        except Exception as e:
+            print(f"[Profile] Aviso: resumo de sessão falhou ({e}).")
+            self.profile.increment_session()
+            self.profile.save()
+
+    @staticmethod
+    def _parse_bullets(text: str) -> list:
+        """Extrai bullets do formato '- texto' ou '• texto' da resposta do LLM."""
+        bullets = []
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if line.startswith(("-", "•", "*", "·")):
+                content = line.lstrip("-•*· ").strip()
+                if len(content) > 5:
+                    bullets.append(content)
+        return bullets[:5]
+
+    # ------------------------------------------------------------------ #
+    #  Kill switch                                                         #
+    # ------------------------------------------------------------------ #
+
     def trigger_kill_switch(self) -> None:
         """Kill switch — para tudo imediatamente."""
         self._running = False
@@ -412,6 +585,17 @@ class RealtimeMode:
             self.audio_sensor.stop()
         if self.vision_sensor:
             self.vision_sensor.stop()
+
+        # Resumo de sessão em background (aprende com a conversa)
+        import threading
+        console.print("[dim][Profile] Gerando resumo de sessão...[/dim]")
+        summary_thread = threading.Thread(
+            target=self._summarize_session,
+            daemon=True,
+            name="jarvis-session-summary",
+        )
+        summary_thread.start()
+        summary_thread.join(timeout=15.0)  # Aguarda até 15s, depois encerra mesmo assim
 
         for task in tasks:
             task.cancel()

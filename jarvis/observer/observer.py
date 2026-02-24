@@ -23,9 +23,41 @@ ERROR_PATTERNS = re.compile(
 )
 
 CONFUSION_PATTERNS = re.compile(
-    r"\b(não sei|não entendo|não consigo|como faço|como fazer|"
-    r"me ajuda|ajuda|help|confused|stuck|lost|"
-    r"o que é|what is|por que|why|como|how)\b",
+    r"("
+    # Pedidos diretos de ajuda — variações naturais
+    r"preciso de ajuda|preciso ajuda|preciso que me ajude|"
+    r"me ajuda|me ajude|pode me ajudar|quero ajuda|"
+    r"d[aá] uma ajuda|d[aá] uma força|me d[aá] uma ajuda|"
+    r"me salva|me socorre|socorro|"
+    # Não saber o que fazer / como prosseguir
+    r"n[aã]o sei o que fazer|n[aã]o sei o que devo fazer|"
+    r"n[aã]o sei como fazer|n[aã]o sei como prosseguir|"
+    r"n[aã]o sei como continuar|n[aã]o sei como avançar|"
+    r"n[aã]o sei por onde|n[aã]o sei o que|n[aã]o sei como|"
+    r"n[aã]o sei o que devo|n[aã]o sei o que eu devo|"
+    r"n[aã]o sei por onde começar|n[aã]o sei o que está|"
+    r"sem saber o que fazer|sem ideia do que fazer|sem ideia|"
+    r"perdido aqui|perdido nisso|"
+    # Estar travado / perdido / bloqueado
+    r"estou perdido|t[oô] perdido|to perdido|"
+    r"estou travado|t[oô] travado|to travado|"
+    r"estou preso|t[oô] preso|to preso|"
+    r"estou bloqueado|t[oô] bloqueado|"
+    r"estou confuso|t[oô] confuso|"
+    r"me sinto perdido|me sinto travado|me sinto confuso|"
+    r"n[aã]o estou conseguindo|n[aã]o t[oô] conseguindo|"
+    r"n[aã]o consigo|n[aã]o estou entendendo|n[aã]o t[oô] entendendo|"
+    r"n[aã]o entendo o que|n[aã]o entendo como|"
+    # Problemas com código / execução
+    r"n[aã]o funciona|n[aã]o t[aá] funcionando|n[aã]o está funcionando|"
+    r"deu erro|deu problema|tá dando erro|está dando erro|"
+    r"n[aã]o roda|n[aã]o executa|n[aã]o abre|quebrou|bugou|"
+    r"o que esse erro|o que [eé] esse erro|como resolver esse erro|"
+    # Inglês
+    r"\bhelp\b|don't know|dont know|i'm stuck|im stuck|"
+    r"\bstuck\b|\blost\b|\bconfused\b|can't figure|cant figure|"
+    r"what should i do|how do i|what is this error"
+    r")",
     re.IGNORECASE,
 )
 
@@ -80,6 +112,7 @@ class Observer:
         app_name = state.get("app_name", "")
         last_speech = state.get("last_speech", "")
         elapsed = state.get("elapsed_since_last_response", 0.0)
+        is_gaming = state.get("activity_type", "UNKNOWN") == "GAMING"
 
         # --- Detectar mudança de janela ---
         if window_title and window_title != self._last_window:
@@ -88,8 +121,8 @@ class Observer:
 
         # --- Evento 1: Erro na tela (prioridade alta) ---
         if screen_text and ERROR_PATTERNS.search(screen_text):
-            # Só avisa se o usuário estiver em IDE e parece travado
-            if app_name in IDE_APPS and elapsed > 60:
+            # Só avisa se em IDE e não está jogando (erros de jogo são normais)
+            if app_name in IDE_APPS and elapsed > 60 and not is_gaming:
                 events.append(JarvisEvent(
                     type=EventType.ERROR_DETECTED,
                     data={"app": app_name},
@@ -103,7 +136,8 @@ class Observer:
 
         # --- Evento 2: Usuário travado (mesmo app por muito tempo) ---
         time_stuck = time.time() - self._stuck_start if self._stuck_start else 0
-        if time_stuck > 180 and elapsed > 120 and app_name in IDE_APPS:
+        # Não dispara durante gaming — é normal jogar por horas
+        if time_stuck > 180 and elapsed > 120 and app_name in IDE_APPS and not is_gaming:
             events.append(JarvisEvent(
                 type=EventType.STUCK_DETECTED,
                 data={"app": app_name, "minutes": round(time_stuck / 60, 1)},
