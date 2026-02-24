@@ -23,7 +23,7 @@ GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 #   llama-3.3-70b-versatile  → melhor qualidade (6k req/dia)
 #   llama-3.1-8b-instant     → mais rápido, ideal para voz (14k req/dia)
 #   gemma2-9b-it             → alternativa leve
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # --- Ollama (local) ---
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
