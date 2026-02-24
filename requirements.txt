@@ -1,0 +1,32 @@
+# LLM Providers
+openai>=1.50.0       # Usado para conectar ao Ollama (API compatível) e OpenAI
+anthropic>=0.40.0    # Opcional: Claude (requer API key)
+python-dotenv>=1.0.0
+
+# Audio capture & VAD
+sounddevice>=0.4.6
+webrtcvad-wheels>=2.0.14  # Windows-compatible (use 'webrtcvad' on Linux/Mac)
+numpy>=1.24.0
+
+# STT (Speech-to-Text) - local
+faster-whisper>=1.0.0
+
+# TTS (Text-to-Speech)
+edge-tts>=6.1.9     # High quality, requires internet
+pyttsx3>=2.90       # Offline fallback
+pygame>=2.5.0       # Audio playback for edge-tts
+
+# Vision
+mss>=9.0.1          # Screen capture
+Pillow>=10.0.0      # Image processing
+pytesseract>=0.3.10 # OCR (requires Tesseract installed separately)
+
+# System context
+pygetwindow>=0.0.9  # Active window info (Windows/Linux/Mac)
+pyperclip>=1.8.2    # Clipboard access
+
+# UI / Terminal
+rich>=13.0.0        # Beautiful terminal output
+
+# Audio processing
+scipy>=1.11.0       # WAV file handling

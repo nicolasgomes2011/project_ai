@@ -1,0 +1,389 @@
+"""
+Agente principal do Jarvis.
+Suporta três providers:
+  - "groq"      → cloud gratuito, Llama 3.3 70B, muito rápido (RECOMENDADO)
+  - "ollama"    → local, offline, ilimitado
+  - "anthropic" → Claude API (requer chave paga)
+
+Seleção via LLM_PROVIDER no .env
+"""
+
+import json
+import webbrowser
+import urllib.parse
+from typing import Dict, List, Optional, Any
+
+from jarvis.config import (
+    LLM_PROVIDER,
+    GROQ_API_KEY, GROQ_MODEL,
+    OLLAMA_HOST, OLLAMA_MODEL,
+    ANTHROPIC_API_KEY, MODEL,
+)
+from jarvis.core.memory import Memory
+
+
+# ------------------------------------------------------------------ #
+#  System Prompt                                                       #
+# ------------------------------------------------------------------ #
+
+SYSTEM_PROMPT = """Você é Jarvis, um assistente de IA pessoal avançado.
+Você vê a tela e ouve a voz do usuário em tempo real. Você é proativo, direto e útil.
+
+Regras:
+- Respostas CURTAS e DIRETAS (máx. 2-3 frases para voz)
+- Sem rodeios, sem respostas genéricas — seja específico ao contexto
+- Detecta quando o usuário precisa de ajuda sem precisar pedir
+
+Contexto injetado automaticamente:
+- [App: nome]      → aplicativo ativo
+- [Janela: titulo] → título da janela
+- [Tela: texto]    → texto detectado na tela (OCR)
+- [Evento: desc]   → evento detectado pelo sistema
+- [Clipboard: txt] → conteúdo copiado
+
+Responda sempre em português do Brasil.
+Se o usuário falar/escrever em inglês, responda em inglês."""
+
+
+# ------------------------------------------------------------------ #
+#  Definição de ferramentas (formato canônico Anthropic)              #
+# ------------------------------------------------------------------ #
+
+TOOLS: List[Dict] = [
+    {
+        "name": "open_url",
+        "description": "Abre uma URL no navegador do usuário.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL completa (incluindo https://)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "copy_to_clipboard",
+        "description": "Copia texto para o clipboard do usuário.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Texto a ser copiado"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "search_web",
+        "description": "Abre uma busca no Google.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Termo de busca"},
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+
+def _tools_to_openai_format(tools: List[Dict]) -> List[Dict]:
+    """Converte ferramentas do formato Anthropic → OpenAI/Ollama."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        }
+        for t in tools
+    ]
+
+
+# ------------------------------------------------------------------ #
+#  Agente                                                              #
+# ------------------------------------------------------------------ #
+
+class Agent:
+    """
+    Gerencia a conversa com o LLM e executa ferramentas.
+    Suporta Groq, Ollama e Anthropic via LLM_PROVIDER no .env
+    """
+
+    def __init__(self, memory: Memory):
+        self.memory = memory
+        self.provider = LLM_PROVIDER
+        self._client = None
+        self._model: str = ""
+        self._init_client()
+
+    # ---------------------------------------------------------------- #
+    #  Inicialização do provider                                        #
+    # ---------------------------------------------------------------- #
+
+    def _init_client(self) -> None:
+        if self.provider == "groq":
+            self._client, self._model = self._build_groq_client()
+        elif self.provider == "ollama":
+            self._client, self._model = self._build_ollama_client()
+        elif self.provider == "anthropic":
+            self._client = self._build_anthropic_client()
+            self._model = MODEL
+        else:
+            raise ValueError(
+                f"LLM_PROVIDER inválido: '{self.provider}'. "
+                "Use 'groq', 'ollama' ou 'anthropic' no .env"
+            )
+
+    def _build_groq_client(self):
+        if not GROQ_API_KEY:
+            raise ValueError(
+                "GROQ_API_KEY não definida no .env\n"
+                "Obtenha grátis em: https://console.groq.com"
+            )
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=GROQ_API_KEY,
+        )
+        print(f"[Agent] Provider: Groq  |  Modelo: {GROQ_MODEL}")
+        return client, GROQ_MODEL
+
+    def _build_ollama_client(self):
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("pip install openai")
+        client = OpenAI(
+            base_url=f"{OLLAMA_HOST}/v1",
+            api_key="ollama",
+        )
+        print(f"[Agent] Provider: Ollama  |  Modelo: {OLLAMA_MODEL}  |  {OLLAMA_HOST}")
+        return client, OLLAMA_MODEL
+
+    def _build_anthropic_client(self):
+        if not ANTHROPIC_API_KEY:
+            raise ValueError(
+                "ANTHROPIC_API_KEY não definida. "
+                "Troque para LLM_PROVIDER=groq para usar sem custo."
+            )
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        print(f"[Agent] Provider: Anthropic  |  Modelo: {MODEL}")
+        return client
+
+    # ---------------------------------------------------------------- #
+    #  Interface pública                                                #
+    # ---------------------------------------------------------------- #
+
+    def chat(self, user_message: str, context: Optional[Dict[str, str]] = None) -> str:
+        """Envia mensagem ao LLM e retorna resposta. Thread-safe."""
+        full_message = self._build_user_message(user_message, context)
+
+        if self.provider in ("groq", "ollama"):
+            response_text = self._chat_openai_compatible(full_message)
+        else:
+            response_text = self._chat_anthropic(full_message)
+
+        self.memory.add_message("user", full_message)
+        self.memory.add_message("assistant", response_text)
+        self.memory.log_event("chat", {
+            "provider": self.provider,
+            "model": self._model,
+            "user": user_message[:200],
+            "response": response_text[:200],
+        })
+        return response_text
+
+    # ---------------------------------------------------------------- #
+    #  Implementação OpenAI-compatible (Groq + Ollama compartilham)    #
+    # ---------------------------------------------------------------- #
+
+    def _chat_openai_compatible(self, user_message: str) -> str:
+        """Único método para Groq e Ollama — mesma API, providers diferentes."""
+        messages = (
+            [{"role": "system", "content": SYSTEM_PROMPT}]
+            + self.memory.get_messages_for_api()
+            + [{"role": "user", "content": user_message}]
+        )
+        tools = _tools_to_openai_format(TOOLS)
+
+        try:
+            return self._openai_tool_loop(messages, tools)
+        except Exception as e:
+            print(f"[Agent] Tool use falhou ({e}). Respondendo sem ferramentas.")
+            return self._openai_simple(messages)
+
+    def _openai_tool_loop(self, messages: List[Dict], tools: List[Dict]) -> str:
+        """Loop de tool use (OpenAI-compatible)."""
+        current = list(messages)
+
+        for _ in range(5):
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=current,
+                tools=tools,
+            )
+            choice = response.choices[0]
+
+            if choice.finish_reason != "tool_calls" or not choice.message.tool_calls:
+                return choice.message.content or ""
+
+            # Adiciona turno do assistente com as tool_calls
+            current.append({
+                "role": "assistant",
+                "content": choice.message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in choice.message.tool_calls
+                ],
+            })
+
+            # Executa ferramentas e adiciona resultados
+            for tc in choice.message.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+                result = self._execute_tool(tc.function.name, args)
+                current.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+        return "Não consegui completar a tarefa."
+
+    def _openai_simple(self, messages: List[Dict]) -> str:
+        """Chamada simples sem tool use."""
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+        )
+        return response.choices[0].message.content or ""
+
+    # ---------------------------------------------------------------- #
+    #  Implementação Anthropic                                          #
+    # ---------------------------------------------------------------- #
+
+    def _chat_anthropic(self, user_message: str) -> str:
+        """Conversa via Anthropic Claude."""
+        import anthropic
+
+        messages = list(self.memory.get_messages_for_api())
+        messages.append({"role": "user", "content": user_message})
+
+        response = self._client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=messages,
+            tools=TOOLS,
+        )
+
+        # Loop de tool use
+        current_messages = messages
+        for _ in range(5):
+            if response.stop_reason != "tool_use":
+                return self._extract_anthropic_text(response)
+
+            assistant_content = []
+            tool_results = []
+
+            for block in response.content:
+                if block.type == "text":
+                    assistant_content.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+                    result = self._execute_tool(block.name, block.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+
+            current_messages = current_messages + [
+                {"role": "assistant", "content": assistant_content},
+                {"role": "user", "content": tool_results},
+            ]
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=1024,
+                system=SYSTEM_PROMPT,
+                messages=current_messages,
+                tools=TOOLS,
+            )
+
+        return self._extract_anthropic_text(response)
+
+    @staticmethod
+    def _extract_anthropic_text(response) -> str:
+        for block in response.content:
+            if block.type == "text":
+                return block.text
+        return ""
+
+    # ---------------------------------------------------------------- #
+    #  Execução de ferramentas (compartilhada entre providers)          #
+    # ---------------------------------------------------------------- #
+
+    def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
+        try:
+            if tool_name == "open_url":
+                url = tool_input.get("url", "")
+                webbrowser.open(url)
+                self.memory.log_event("tool", {"name": "open_url", "url": url})
+                return f"URL aberta: {url}"
+
+            elif tool_name == "copy_to_clipboard":
+                import pyperclip
+                text = tool_input.get("text", "")
+                pyperclip.copy(text)
+                self.memory.log_event("tool", {"name": "copy_to_clipboard", "chars": len(text)})
+                return "Texto copiado para o clipboard."
+
+            elif tool_name == "search_web":
+                query = tool_input.get("query", "")
+                encoded = urllib.parse.quote(query)
+                webbrowser.open(f"https://www.google.com/search?q={encoded}")
+                self.memory.log_event("tool", {"name": "search_web", "query": query})
+                return f"Busca aberta: {query}"
+
+        except Exception as e:
+            return f"Erro ao executar {tool_name}: {e}"
+
+        return f"Ferramenta desconhecida: {tool_name}"
+
+    # ---------------------------------------------------------------- #
+    #  Auxiliares                                                       #
+    # ---------------------------------------------------------------- #
+
+    def _build_user_message(self, text: str, context: Optional[Dict[str, str]]) -> str:
+        """Monta mensagem do usuário com contexto do sistema."""
+        parts = []
+        if context:
+            if context.get("app_name"):
+                parts.append(f"[App: {context['app_name']}]")
+            if context.get("window_title") and context["window_title"] != context.get("app_name"):
+                parts.append(f"[Janela: {context['window_title'][:80]}]")
+            if context.get("screen_text"):
+                parts.append(f"[Tela: {context['screen_text'][:500]}]")
+            if context.get("proactive_event"):
+                parts.append(f"[Evento: {context['proactive_event']}]")
+            if context.get("clipboard") and len(context.get("clipboard", "")) > 5:
+                parts.append(f"[Clipboard: {context['clipboard'][:100]}]")
+
+        return ("\n".join(parts) + "\n\n" + text) if parts else text
