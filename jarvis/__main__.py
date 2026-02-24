@@ -8,6 +8,11 @@ import asyncio
 import signal
 import sys
 
+# Força UTF-8 no terminal Windows (evita erros com acentos e emojis)
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from rich.console import Console
 
 console = Console()
