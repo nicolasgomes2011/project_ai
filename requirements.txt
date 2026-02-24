@@ -30,3 +30,8 @@ rich>=13.0.0        # Beautiful terminal output
 
 # Audio processing
 scipy>=1.11.0       # WAV file handling
+
+# Google Docs (modo anotação)
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0

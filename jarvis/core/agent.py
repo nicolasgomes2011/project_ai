@@ -29,10 +29,20 @@ from jarvis.core.memory import Memory
 SYSTEM_PROMPT = """Você é Jarvis, um assistente de IA pessoal avançado.
 Você vê a tela e ouve a voz do usuário em tempo real. Você é proativo, direto e útil.
 
-Regras:
+Regras gerais:
 - Respostas CURTAS e DIRETAS (máx. 2-3 frases para voz)
 - Sem rodeios, sem respostas genéricas — seja específico ao contexto
 - Detecta quando o usuário precisa de ajuda sem precisar pedir
+
+REGRAS CRÍTICAS SOBRE FERRAMENTAS (leia com atenção):
+- Use ferramentas SOMENTE quando o usuário pedir EXPLICITAMENTE. Exemplos válidos:
+    "pesquise X", "abre o site Y", "copia isso"
+- NUNCA use ferramentas para inferir o que o usuário quer fazer.
+- Se o usuário disser algo ambíguo como "preciso testar", "vou ver isso depois",
+  "não entendi" — responda COM TEXTO, não abra navegador ou execute ação.
+- "testar" em contexto de programação = rodar testes locais. NÃO = buscar na web.
+- Em caso de dúvida sobre o que o usuário quer, PERGUNTE antes de agir.
+- Nunca abra URLs ou faça buscas sem permissão explícita do usuário.
 
 Contexto injetado automaticamente:
 - [App: nome]      → aplicativo ativo
@@ -52,7 +62,12 @@ Se o usuário falar/escrever em inglês, responda em inglês."""
 TOOLS: List[Dict] = [
     {
         "name": "open_url",
-        "description": "Abre uma URL no navegador do usuário.",
+        "description": (
+            "Abre uma URL específica no navegador. "
+            "Use APENAS quando o usuário fornecer explicitamente uma URL para abrir "
+            "(ex: 'abre o site exemplo.com'). "
+            "NUNCA use para pesquisar ou inferir URLs com base no contexto."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -63,7 +78,11 @@ TOOLS: List[Dict] = [
     },
     {
         "name": "copy_to_clipboard",
-        "description": "Copia texto para o clipboard do usuário.",
+        "description": (
+            "Copia um texto específico para o clipboard do usuário. "
+            "Use APENAS quando o usuário pedir para copiar algo (ex: 'copia esse código', "
+            "'coloca isso no clipboard')."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -74,11 +93,18 @@ TOOLS: List[Dict] = [
     },
     {
         "name": "search_web",
-        "description": "Abre uma busca no Google.",
+        "description": (
+            "Abre uma busca no Google. "
+            "Use APENAS quando o usuário pedir explicitamente para pesquisar algo na internet "
+            "(ex: 'pesquise X', 'busca por Y', 'procura sobre Z'). "
+            "NUNCA use para resolver dúvidas de programação, erros no código, ou respostas "
+            "que você mesmo pode fornecer. "
+            "NUNCA use quando o usuário disser 'testar', 'ver', 'tentar' ou expressões ambíguas."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Termo de busca"},
+                "query": {"type": "string", "description": "Termo de busca explicitamente pedido pelo usuário"},
             },
             "required": ["query"],
         },

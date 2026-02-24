@@ -64,3 +64,7 @@ TTS_USE_EDGE: bool = os.getenv("JARVIS_TTS_EDGE", "True").lower() == "true"
 
 # --- Proatividade ---
 PROACTIVITY_COOLDOWN: int = int(os.getenv("PROACTIVITY_COOLDOWN", "120"))
+
+# --- Google Docs (modo anotação) ---
+GDOCS_CREDENTIALS_PATH: str = os.getenv("GDOCS_CREDENTIALS_PATH", "credentials.json")
+GDOCS_TOKEN_PATH: str = os.getenv("GDOCS_TOKEN_PATH", "token.json")

@@ -37,3 +37,7 @@ models/
 # Windows
 Thumbs.db
 Desktop.ini
+
+# Google OAuth (credenciais — nunca versionar)
+credentials.json
+token.json
