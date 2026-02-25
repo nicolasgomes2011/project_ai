@@ -5,7 +5,7 @@ import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from rich.console import Console
 from rich.panel import Panel
@@ -41,7 +41,7 @@ class RealtimeMode:
 
     Loop de sensores:
         Microfone → VAD → STT → Agente → TTS
-        Tela (1 FPS) → OCR → Observer → Decision → Agente → TTS
+        Tela (1 FPS) → OCR/Screenshot → Observer → Decision → Agente → TTS
     """
 
     def __init__(self, vision_enabled: bool = True, voice_enabled: bool = True):
@@ -92,6 +92,10 @@ class RealtimeMode:
         # Kill switch
         self._kill_event = asyncio.Event()
 
+        # Rastreia tasks de utterance para cancelamento limpo no shutdown
+        # (tasks criadas por asyncio.run_coroutine_threadsafe no VAD thread)
+        self._pending_utterance_tasks: Set[asyncio.Task] = set()
+
     # ------------------------------------------------------------------ #
     #  Ponto de entrada                                                    #
     # ------------------------------------------------------------------ #
@@ -105,13 +109,14 @@ class RealtimeMode:
             "[bold green]JARVIS[/bold green] — Modo Realtime\n"
             "[dim]Ctrl+C para encerrar | Ouvindo continuamente...[/dim]\n"
             f"[dim]Voz: {'✓' if self.voice_enabled else '✗'} | "
-            f"Visão: {'✓' if self.vision_enabled else '✗'}[/dim]",
+            f"Visão: {'✓' if self.vision_enabled else '✗'} | "
+            f"Provider: {self.agent.provider} ({self.agent._model})[/dim]",
             border_style="green",
         ))
 
-        # Configura sensor de áudio
+        # Configura sensor de áudio — usa wrapper rastreado para shutdown limpo
         if self.audio_sensor:
-            self.audio_sensor.set_callback(loop, self._on_utterance)
+            self.audio_sensor.set_callback(loop, self._tracked_utterance)
             self.audio_sensor.start()
             self._mic_active = True
 
@@ -134,6 +139,25 @@ class RealtimeMode:
             await self._shutdown(tasks)
 
     # ------------------------------------------------------------------ #
+    #  Wrapper rastreado para utterances (shutdown limpo)                 #
+    # ------------------------------------------------------------------ #
+
+    async def _tracked_utterance(self, audio_bytes: bytes) -> None:
+        """
+        Wrapper em torno de _on_utterance que registra a task atual no set de
+        tasks pendentes. Isso permite que _shutdown() cancele-as corretamente,
+        evitando o warning "Task was destroyed but it is pending!".
+        """
+        task = asyncio.current_task()
+        if task is not None:
+            self._pending_utterance_tasks.add(task)
+        try:
+            await self._on_utterance(audio_bytes)
+        finally:
+            if task is not None:
+                self._pending_utterance_tasks.discard(task)
+
+    # ------------------------------------------------------------------ #
     #  Callback de áudio (chamado do thread de VAD)                       #
     # ------------------------------------------------------------------ #
 
@@ -149,9 +173,14 @@ class RealtimeMode:
         self.observer.reset_cooldown()
 
         # STT em thread pool (não bloqueia o loop asyncio)
+        t_stt_start = time.perf_counter()
         loop = asyncio.get_event_loop()
         text = await loop.run_in_executor(self._executor, self.stt.transcribe, audio_bytes)
+        stt_ms = (time.perf_counter() - t_stt_start) * 1000
         self._speech_detected = False
+
+        if text:
+            print(f"[Perf] STT: {stt_ms:.0f}ms | '{text[:60]}{'...' if len(text)>60 else ''}'")
 
         if not text or len(text.strip()) < 2:
             self._status_line = "Pronto"
@@ -301,10 +330,7 @@ class RealtimeMode:
     async def _check_learn_command(self, text: str) -> bool:
         """
         Detecta comandos explícitos de aprendizado e salva no perfil.
-        Retorna True se o texto é um comando de aprendizado (não deve ir para o agente).
-
-        Padrões detectados (texto deve COMEÇAR com um dos triggers):
-            "lembra que X", "anota que X", "guarda que X", "remember that X"
+        Retorna True se o texto é um comando de aprendizado.
         """
         text_lower = text.strip().lower()
         LEARN_TRIGGERS = [
@@ -345,11 +371,46 @@ class RealtimeMode:
 
         self._processing = True
         self._status_line = "Pensando..."
+        t_respond_start = time.perf_counter()
 
         try:
             context = self.system_ctx.get_context()
+
+            # --- Visão: frame freshness + contexto visual ---
             if self.vision_sensor:
-                context["screen_text"] = self.vision_sensor.get_last_ocr()
+                t_vision_start = time.perf_counter()
+
+                frame_age = self.vision_sensor.get_frame_age()
+                if frame_age > cfg.VISION_FRAME_MAX_AGE_S:
+                    # Frame desatualizado: captura novo no executor (não bloqueia event loop)
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(self._executor, self.vision_sensor.capture)
+                    frame_age = self.vision_sensor.get_frame_age()
+
+                # Contexto textual (OCR ou metadados de fallback)
+                screen_text = self.vision_sensor.get_screen_context_text()
+                if screen_text:
+                    context["screen_text"] = screen_text
+
+                # Para Anthropic: envia screenshot real como imagem multimodal
+                if self.agent.provider == "anthropic":
+                    b64 = self.vision_sensor.get_screenshot_base64()
+                    if b64:
+                        context["screenshot_b64"] = b64
+                        context["vision_mode"] = "screenshot multimodal anexado"
+                    elif screen_text:
+                        context["vision_mode"] = "texto OCR"
+                elif screen_text:
+                    context["vision_mode"] = "texto OCR"
+
+                vision_ms = (time.perf_counter() - t_vision_start) * 1000
+                print(
+                    f"[Perf] Visão: {vision_ms:.0f}ms | "
+                    f"frame_age={frame_age:.1f}s | "
+                    f"ocr={bool(self.vision_sensor.get_last_ocr())} | "
+                    f"b64={'screenshot_b64' in context}"
+                )
+
             if proactive_context:
                 context.update(proactive_context)
 
@@ -370,9 +431,17 @@ class RealtimeMode:
                 context["profile"] = profile_ctx
 
             # Chamada ao agente (bloqueante → thread pool)
+            t_llm_start = time.perf_counter()
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 self._executor, self.agent.chat, text, context
+            )
+            llm_ms = (time.perf_counter() - t_llm_start) * 1000
+
+            total_ms = (time.perf_counter() - t_respond_start) * 1000
+            print(
+                f"[Perf] Resposta total: {total_ms:.0f}ms "
+                f"(LLM incluso: {llm_ms:.0f}ms)"
             )
 
             self._last_response = response
@@ -442,22 +511,57 @@ class RealtimeMode:
         """Exibe linha de status no terminal."""
         while self._running:
             await asyncio.sleep(0.5)
-            mic_icon = "🎤" if self._mic_active else "🔇"
-            vision_icon = "👁" if self.vision_enabled else "—"
-            speech_icon = "💬" if self._speech_detected else " "
-            proc_icon = "⚙" if self._processing else " "
-            annot_icon = "📝" if self._annotation_mode else " "
-
-            status = (
-                f"[dim]{mic_icon} {speech_icon} {vision_icon} {proc_icon} {annot_icon} "
-                f"| {self._status_line} "
-                f"| Sessão: {int(self.memory.session_duration)}s[/dim]"
-            )
-            # Usa print simples para não interferir com o output principal
+            # Status line mantida internamente; output não interfere com o Rich console
 
     # ------------------------------------------------------------------ #
     #  Shutdown                                                            #
     # ------------------------------------------------------------------ #
+
+    async def _shutdown(self, tasks: list) -> None:
+        """Encerra o Jarvis de forma limpa, sem warnings de tasks pendentes."""
+
+        # Encerra modo anotação se ativo
+        if self._annotation_mode:
+            console.print("[yellow][Anotação] Encerrando modo anotação...[/yellow]")
+            await self._stop_annotation()
+
+        self._running = False
+        self.tts.stop()
+
+        if self.audio_sensor:
+            self.audio_sensor.stop()
+        if self.vision_sensor:
+            self.vision_sensor.stop()
+
+        # Cancela e aguarda tasks de utterance pendentes (evita "Task was destroyed")
+        pending_utterances = list(self._pending_utterance_tasks)
+        if pending_utterances:
+            console.print(
+                f"[dim][Shutdown] Cancelando {len(pending_utterances)} task(s) de utterance...[/dim]"
+            )
+            for t in pending_utterances:
+                t.cancel()
+            await asyncio.gather(*pending_utterances, return_exceptions=True)
+            self._pending_utterance_tasks.clear()
+
+        # Cancela e aguarda tasks de background (observer, status)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Resumo de sessão em background (aprende com a conversa)
+        import threading
+        console.print("[dim][Profile] Gerando resumo de sessão...[/dim]")
+        summary_thread = threading.Thread(
+            target=self._summarize_session,
+            daemon=True,
+            name="jarvis-session-summary",
+        )
+        summary_thread.start()
+        summary_thread.join(timeout=15.0)  # Aguarda até 15s, depois encerra mesmo assim
+
+        self._executor.shutdown(wait=False)
+        console.print("\n[dim]Jarvis encerrado. Até logo![/dim]")
 
     # ------------------------------------------------------------------ #
     #  Aprendizado automático — resumo de sessão                          #
@@ -467,8 +571,6 @@ class RealtimeMode:
         """
         Gera um resumo da sessão via LLM e salva no perfil do usuário.
         Chamado em background thread no shutdown — não bloqueia o encerramento.
-        Só executa se houver pelo menos SESSION_SUMMARY_MIN_EXCHANGES trocas.
-        Usa o modelo mais rápido disponível (llama-3.1-8b-instant no Groq).
         """
         exchange_count = self.memory.message_count // 2
         if exchange_count < cfg.SESSION_SUMMARY_MIN_EXCHANGES:
@@ -504,37 +606,36 @@ class RealtimeMode:
         )
 
         try:
-            from openai import OpenAI
-
-            if self.agent.provider == "groq":
+            if self.agent.provider == "anthropic":
+                # Reutiliza o agente Anthropic diretamente
+                response_text = self.agent._chat_anthropic(summary_prompt)
+            elif self.agent.provider == "groq":
+                from openai import OpenAI
                 client = OpenAI(
                     base_url="https://api.groq.com/openai/v1",
                     api_key=cfg.GROQ_API_KEY,
                 )
-                model = "llama-3.1-8b-instant"   # Rápido e barato — não usa a quota do 70B
-            elif self.agent.provider == "ollama":
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",  # Rápido e barato
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    max_tokens=300,
+                    temperature=0.3,
+                )
+                response_text = response.choices[0].message.content or ""
+            else:
+                from openai import OpenAI
                 client = OpenAI(
                     base_url=f"{cfg.OLLAMA_HOST}/v1",
                     api_key="ollama",
                 )
-                model = cfg.OLLAMA_MODEL
-            else:
-                # Anthropic: reutiliza agente diretamente
-                response_text = self.agent._chat_anthropic(summary_prompt)
-                bullets = self._parse_bullets(response_text)
-                self.profile.add_insights(bullets)
-                self.profile.increment_session()
-                self.profile.save()
-                print(f"[Profile] Sessão resumida: {len(bullets)} insight(s) salvos.")
-                return
+                response = client.chat.completions.create(
+                    model=cfg.OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    max_tokens=300,
+                    temperature=0.3,
+                )
+                response_text = response.choices[0].message.content or ""
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": summary_prompt}],
-                max_tokens=300,
-                temperature=0.3,
-            )
-            response_text = response.choices[0].message.content or ""
             bullets = self._parse_bullets(response_text)
             self.profile.add_insights(bullets)
             self.profile.increment_session()
@@ -571,35 +672,3 @@ class RealtimeMode:
         if self.vision_sensor:
             self.vision_sensor.stop()
         self._kill_event.set()
-
-    async def _shutdown(self, tasks: list) -> None:
-        # Encerra modo anotação se ativo
-        if self._annotation_mode:
-            console.print("[yellow][Anotação] Encerrando modo anotação...[/yellow]")
-            await self._stop_annotation()
-
-        self._running = False
-        self.tts.stop()
-
-        if self.audio_sensor:
-            self.audio_sensor.stop()
-        if self.vision_sensor:
-            self.vision_sensor.stop()
-
-        # Resumo de sessão em background (aprende com a conversa)
-        import threading
-        console.print("[dim][Profile] Gerando resumo de sessão...[/dim]")
-        summary_thread = threading.Thread(
-            target=self._summarize_session,
-            daemon=True,
-            name="jarvis-session-summary",
-        )
-        summary_thread.start()
-        summary_thread.join(timeout=15.0)  # Aguarda até 15s, depois encerra mesmo assim
-
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        self._executor.shutdown(wait=False)
-        console.print("\n[dim]Jarvis encerrado. Até logo![/dim]")

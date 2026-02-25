@@ -12,26 +12,29 @@ LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 # --- Provider LLM ---
-# "groq"       → cloud gratuito, rápido, sem instalar nada (RECOMENDADO)
+# "anthropic"  → Claude (PADRÃO — requer ANTHROPIC_API_KEY)
+# "groq"       → cloud gratuito, rápido (requer GROQ_API_KEY)
 # "ollama"     → local, offline, ilimitado (requer instalação)
-# "anthropic"  → Claude (requer chave paga)
-LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq")
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "anthropic")
 
-# --- Groq (cloud gratuito) ---
+# --- Anthropic Claude (padrão) ---
+ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+# Modelos disponíveis:
+#   claude-sonnet-4-6        → RECOMENDADO: melhor qualidade + visão multimodal
+#   claude-haiku-4-5-20251001 → mais rápido e barato
+ANTHROPIC_MODEL: str = os.getenv("JARVIS_MODEL", "claude-sonnet-4-6")
+MODEL: str = ANTHROPIC_MODEL  # alias de compatibilidade
+
+# --- Groq (fallback cloud gratuito) ---
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 # Modelos disponíveis no free tier:
-#   llama-3.3-70b-versatile  → melhor qualidade (6k req/dia)
 #   llama-3.1-8b-instant     → mais rápido, ideal para voz (14k req/dia)
-#   gemma2-9b-it             → alternativa leve
+#   llama-3.3-70b-versatile  → melhor qualidade (6k req/dia)
 GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # --- Ollama (local) ---
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-
-# --- Anthropic (opcional) ---
-ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-MODEL: str = os.getenv("JARVIS_MODEL", "claude-sonnet-4-6")
 
 # --- Idioma ---
 LANGUAGE: str = os.getenv("JARVIS_LANGUAGE", "pt")
@@ -52,6 +55,14 @@ TESSERACT_CMD: str = os.getenv(
     "TESSERACT_PATH",
     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
+# Idade máxima do frame (s) antes de forçar nova captura ao responder
+VISION_FRAME_MAX_AGE_S: float = float(os.getenv("VISION_FRAME_MAX_AGE_S", "2.0"))
+# Ativa logs de debug da visão (resolução, timestamp, tamanho)
+VISION_DEBUG: bool = os.getenv("VISION_DEBUG", "false").lower() == "true"
+# Qualidade JPEG do screenshot enviado ao LLM (1-95)
+VISION_JPEG_QUALITY: int = int(os.getenv("VISION_JPEG_QUALITY", "50"))
+# Largura máxima do screenshot enviado ao LLM (px)
+VISION_MAX_WIDTH: int = int(os.getenv("VISION_MAX_WIDTH", "1280"))
 
 # --- STT ---
 WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL", "small")

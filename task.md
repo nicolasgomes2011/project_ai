@@ -1,94 +1,105 @@
-PS C:\Users\gomes\OneDrive\Documentos\Projetos\project_ai> python -m jarvis --mode realtime
-✓ Groq conectado → modelo: llama-3.3-70b-versatile
-Iniciando em modo realtime...
+# TASK — Trocar LLM (Groq → Claude) + Corrigir visão (leitura de tela) + Melhorar latência
 
-[Agent] Provider: Groq  |  Modelo: llama-3.3-70b-versatile
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ JARVIS — Modo Realtime                                                                                                                           │
-│ Ctrl+C para encerrar | Ouvindo continuamente...                                                                                                  │
-│ Voz: ✓ | Visão: ✓                                                                                                                                │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-[Audio] Sensor de áudio iniciado.
-[Vision] Sensor de visão iniciado.
-[STT] Carregando modelo Whisper 'small'... (primeira vez pode demorar)
-[STT] Modelo carregado.
+## Contexto / Problemas observados
+Rodando no PC (Windows) com:
+`python -m jarvis --mode realtime`
 
-Você: Essa não pode ser pesada.  É pesada?  Ele estava dando aqui.  Ô, o professor me chamou para fazer um negócio com ele lá.  Tipo, uma limpeza de
-programação.  Tá.  Cara, três meses programando seis horas mais por dia.  Três meses.  Programando seis horas a mais.  É.  Mas ficou programando
-aqui mais seis horas lá.  Mais chances federales, final.  Tá, mas ele vai ter vinte e oito horas com o teu dinheiro.  Mas tem que ser um brilho de
-monstro e de café.  Eu tenho certeza.  Eu tenho certeza.  Eu tenho certeza, Felipe.  Nossa senhora, mas isso aí é escuro.  É.  Desculpe.  Não tem
-pra ver.  Eu preciso indicar a torna.  Já dei um.
-Jarvis: Parece que você está tendo uma conversa confusa e mencionou algo sobre programação e um projeto, mas não está claro o que você precisa
-exatamente. Você gostaria de falar mais sobre o que está fazendo ou precisa de ajuda com algo específico?
-pygame 2.6.1 (SDL 2.28.4, Python 3.12.8)
-Hello from the pygame community. https://www.pygame.org/contribute.html
+O sistema inicia com áudio + visão “ativas” no log, mas:
+1) A IA responde que não consegue ver a tela, mesmo com “Visão: ✓” e “Sensor de visão iniciado”.
+2) O tempo de resposta está muito lento: algumas perguntas levam **15+ segundos** para serem respondidas.
+3) A IA não parece identificar bem o que está rolando na tela — possivelmente por:
+   - visão não estar chegando no prompt,
+   - frame desatualizado (delay),
+   - pipeline lento (captura/STT/LLM) que faz o contexto visual chegar “atrasado”.
 
-Você: A gente tem que me dizer se o Maira tomou o card na transmissão de boa letra de vocação  ou se ele criou o card de zé ponte  porque lá no
-quadro do gilho a gente não tem nada  Mas se não é assim, a gente vai pegar o quadrado inteiro  Como assim?  O quadrado inteiro é sempre meu  e eu
-não sei se ele não aparece pra gente, se não aparece todos
-Jarvis: Parece que você está discutindo sobre um projeto ou uma tarefa específica, mas o texto na tela está muito confuso e não está claro o que
-você precisa. Você gostaria de explicar melhor o que está acontecendo ou o que você precisa fazer? Talvez eu possa ajudar a esclarecer as coisas.
+Ao encerrar, aparece warning:
+`Task was destroyed but it is pending! ... RealtimeMode._on_utterance() ...`
+indicando shutdown incompleto.
 
-Você: Legendas pela comunidade de Amara.org
+Obs: no notebook onde foi desenvolvido inicialmente parecia ok; no PC atual pode existir algo de permissão/captura bloqueada.
 
-Você: O que é isso?  O que é isso?  O que é isso?  É isso.
+---
 
-Você: Nois, o que é isso?  Não, o que é o que é o que é o que é o que é o que é?
+## Objetivos (mudanças solicitadas)
+1) Trocar o provedor/motor de LLM:
+   - Atualmente: Groq.
+   - Desejado: Anthropic Claude (porque já pago mensal e quero melhor qualidade).
+   - Manter Groq opcional como fallback (se for fácil).
 
-Você: Eu não sei, mas ela é...
-[Agent] Tool use falhou (Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01kj7y8e82ekktf8cv5a060k0h` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99373, Requested 2213. Please try again in 22m50.303999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}). Respondendo sem ferramentas.
-Erro: Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization
-`org_01kj7y8e82ekktf8cv5a060k0h` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99373, Requested 1550. Please try again in
-13m17.472s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code':
-'rate_limit_exceeded'}}
+2) Corrigir bug da “Visão”:
+   - Garantir captura real de tela e envio do contexto visual para o agente/LLM.
+   - Não depender de OCR (Tesseract pode estar ausente). Visão deve funcionar com screenshot mesmo sem OCR.
+   - Fazer o agente “assumir” que tem visão ativa quando estiver, e responder coerentemente quando perguntado.
 
-Você: e eles comparam com os outros produtos do ano anterior.
-[Agent] Tool use falhou (Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01kj7y8e82ekktf8cv5a060k0h` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99371, Requested 2196. Please try again in 22m33.888s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}). Respondendo sem ferramentas.
-Erro: Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization
-`org_01kj7y8e82ekktf8cv5a060k0h` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99371, Requested 1533. Please try again in
-13m1.055999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code':
-'rate_limit_exceeded'}}
+3) Melhorar latência (respostas rápidas e visão atualizada):
+   - Instrumentar o pipeline para medir tempo por etapa e identificar gargalos.
+   - Reduzir o “end-to-end latency” (fala → resposta) e garantir que o frame usado seja RECENTE.
+   - Se a visão é usada, garantir que o frame esteja dentro de um limite (ex.: capturado nos últimos 1–2s); caso contrário, capturar novamente antes de responder.
 
-Você: É, isso é muito ruim, mas vai com a mão.  É, muito ruim, mas vai com a mão.  É, muito ruim, mas vai com a mão.
-[Agent] Tool use falhou (Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01kj7y8e82ekktf8cv5a060k0h` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99283, Requested 2225. Please try again in 21m42.912s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}). Respondendo sem ferramentas.
-Erro: Error code: 429 - {'error': {'message': 'Rate limit reached for model `llama-3.3-70b-versatile` in organization
-`org_01kj7y8e82ekktf8cv5a060k0h` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99283, Requested 1562. Please try again in
-12m10.079999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code':
-'rate_limit_exceeded'}}
+4) Ajustar encerramento:
+   - Remover “Task was destroyed but it is pending!” com cancelamento/await corretos das tasks.
 
-Você: Aí não tem nem poucos, não tem nada a ver com isso.  Acho que não tem nada a ver com isso.  Aí eu fico com um pão na tarde, então você tem que
-ser doce.  Eu não sou fácil, porque eu acho que eu ainda não fico metrônica.  Como é eu?  Ah, eu sei que quando eu dei doido de menino, eu não sei
-se eu também não estava mantendo.  Ah, ah, ah.  Bom, então eu fico com um pão na tarde.  Ah, e de vez em vez, é fácil, né?  De vez em vez de eu não
-lembrar se não é, eu fico com um pão na tarde.
+---
 
-Você: O que é isso?  É a lente, isso aqui, ó.  Mas não é a lente da lente.
+## Requisitos de implementação
 
-Você: Eu não cheguei com um bem de merda.  Nossa, não é assim.  Você tá falando da profissional, né?  Sim.  Ó, é assim, ó.  Um, dois, três, tudo.
+### A) Provider Claude (Anthropic)
+- Localizar onde o provider é selecionado (config/env/factory).
+- Implementar provider Anthropic com `ANTHROPIC_API_KEY` e modelo configurável por env.
+- Atualizar README com instruções e exemplos de `.env`.
 
-Você: O que você quer dizer de todo mundo?  Ali é o meu mundo.  Eu não estou falando de nada.
+### B) Visão: captura de tela + anexação no prompt (com logs)
+- Localizar:
+  - onde a tela é capturada (ex.: `mss`)
+  - onde vira “contexto” pro agente
+- Adicionar logs (modo debug) para:
+  - confirmar captura (resolução, tamanho, timestamp, monitor)
+  - confirmar que a imagem/descrição chegou no payload do LLM
+- Comportamento esperado:
+  - Se visão ativa, ao perguntar “Você consegue ver minha tela?” o Jarvis deve confirmar e descrever algo mínimo do frame atual.
+- OCR:
+  - Se Tesseract não existir, ainda assim usar screenshot.
+  - Se existir, habilitar OCR.
+- Windows:
+  - Tratar exceções de captura (permissão/tela preta/multi-monitor) e logar erro explicitamente.
 
-Você: Mas, o tomate também está nos dias de drogar, né?  É de uma ótima sensibilidade. Eu acho que se deram errado, eu preciso ver.  Se deram
-errado, isso é um sentido de tomate.
+### C) Performance / Latência (novo)
+- Medir e logar tempos por etapa (em ms), por exemplo:
+  - VAD/segmentação de fala
+  - STT (Whisper) tempo de transcrição
+  - Captura de visão (screenshot) tempo
+  - OCR (se ativo) tempo
+  - Montagem do prompt/contexto
+  - Tempo da chamada ao LLM (TTFB e total)
+- Reduzir latência com medidas práticas:
+  - Não bloquear resposta esperando OCR se OCR estiver lento (usar OCR assíncrono ou “best effort”).
+  - Reduzir tamanho do contexto visual (ex.: downscale/qualidade JPEG) antes de enviar (se multimodal suportado).
+  - Cache do último frame + timestamp e política de “frame freshness” (usar frame recente; se velho, capturar novo).
+  - Evitar reprocessar visão a cada micro-interação se não for necessário.
+- Verificar se o modo realtime está esperando tool calls/retries desnecessários.
 
-Encerrando Jarvis...
-[Audio] Sensor de áudio parado.
-[Vision] Sensor de visão parado.
-[Audio] Sensor de áudio parado.
+### D) Shutdown correto
+- No Ctrl+C:
+  - cancelar tasks pendentes (incluindo `_on_utterance`)
+  - `await gather(return_exceptions=True)`
+  - parar sensores 1x (sem duplicar logs)
+- Encerrar sem warnings.
 
-Encerrando Jarvis...
-[Audio] Sensor de áudio parado.
+---
 
-Encerrando Jarvis...
-[Audio] Sensor de áudio parado.
+## Critérios de aceite (DoD)
+- Rodar `python -m jarvis --mode realtime` e obter:
+  - Provider: Claude conectado (modelo via ENV).
+  - Resposta mais rápida (visivelmente menor que ~15s em perguntas simples) e logs mostrando onde era o gargalo.
+  - Visão funcional:
+    - captura confirmada por logs (resolução/timestamp)
+    - frame usado é recente (política de freshness)
+    - ao perguntar “Você consegue ver minha tela?”, o Jarvis confirma e descreve algo do frame atual
+  - Encerramento limpo sem “Task was destroyed but it is pending!”
 
-Encerrando Jarvis...
-[Audio] Sensor de áudio parado.
-[Vision] Sensor de visão parado.
-[Vision] Sensor de visão parado.
-[Vision] Sensor de visão parado.
-[Vision] Sensor de visão parado.
+---
 
-Você: Não é?  Nossa, por que escada aqui, ó?  Eu não sei se o que é isso.  Então como é que vai enxergar?  Já não parece?  Vou ver por que é isso.
-Nossa, saiu.  A gente não vai me enxergar, não.  Aí ela saiu do verneiro, no dia que o outro saiu no colo dela.
-
-Jarvis encerrado. Até logo!
+## Pistas do meu teste
+- “Visão: ✓” e “Sensor de visão iniciado”, mas o LLM disse que não vê a tela.
+- “Tesseract não encontrado — OCR desativado” (ok, mas visão não pode depender disso).
+- Latência alta (15+ segundos) e pouca “consciência” do que acontece na tela.

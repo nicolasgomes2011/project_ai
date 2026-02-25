@@ -20,9 +20,30 @@ console = Console()
 
 def _check_provider() -> bool:
     """Verifica se o provider LLM está pronto para uso."""
-    from jarvis.config import LLM_PROVIDER, GROQ_API_KEY, GROQ_MODEL, ANTHROPIC_API_KEY, OLLAMA_HOST, OLLAMA_MODEL
+    from jarvis.config import (
+        LLM_PROVIDER,
+        GROQ_API_KEY, GROQ_MODEL,
+        ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
+        OLLAMA_HOST, OLLAMA_MODEL,
+    )
 
-    if LLM_PROVIDER == "groq":
+    if LLM_PROVIDER == "anthropic":
+        if not ANTHROPIC_API_KEY:
+            console.print(
+                "[red]❌ ANTHROPIC_API_KEY não definida.[/red]\n\n"
+                "[bold]Para usar o Anthropic Claude (padrão):[/bold]\n"
+                "  1. Acesse: [cyan]https://console.anthropic.com[/cyan]\n"
+                "  2. Gere uma API key\n"
+                "  3. Adicione ao [cyan].env[/cyan]: [cyan]ANTHROPIC_API_KEY=sua_chave[/cyan]\n\n"
+                "[dim]Alternativa gratuita: defina [cyan]LLM_PROVIDER=groq[/cyan] e [cyan]GROQ_API_KEY=...[/cyan][/dim]"
+            )
+            return False
+        console.print(
+            f"[green]✓ Anthropic Claude configurado[/green] → modelo: [cyan]{ANTHROPIC_MODEL}[/cyan]"
+        )
+        return True
+
+    elif LLM_PROVIDER == "groq":
         if not GROQ_API_KEY:
             console.print(
                 "[red]❌ GROQ_API_KEY não definida.[/red]\n\n"
@@ -56,16 +77,6 @@ def _check_provider() -> bool:
             )
             return False
         console.print(f"[green]✓ Ollama conectado[/green] → modelo: [cyan]{OLLAMA_MODEL}[/cyan]")
-        return True
-
-    elif LLM_PROVIDER == "anthropic":
-        if not ANTHROPIC_API_KEY:
-            console.print(
-                "[red]❌ ANTHROPIC_API_KEY não definida.[/red]\n"
-                "Troque para [cyan]LLM_PROVIDER=groq[/cyan] para usar sem custo."
-            )
-            return False
-        console.print("[green]✓ Anthropic configurado[/green]")
         return True
 
     else:

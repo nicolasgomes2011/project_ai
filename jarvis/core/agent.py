@@ -1,14 +1,15 @@
 """
 Agente principal do Jarvis.
 Suporta três providers:
-  - "groq"      → cloud gratuito, Llama 3.3 70B, muito rápido (RECOMENDADO)
+  - "anthropic" → Claude API (PADRÃO — requer ANTHROPIC_API_KEY, suporta visão multimodal)
+  - "groq"      → cloud gratuito, Llama 3.x, muito rápido (fallback)
   - "ollama"    → local, offline, ilimitado
-  - "anthropic" → Claude API (requer chave paga)
 
 Seleção via LLM_PROVIDER no .env
 """
 
 import json
+import time
 import webbrowser
 import urllib.parse
 from typing import Dict, List, Optional, Any
@@ -17,7 +18,7 @@ from jarvis.config import (
     LLM_PROVIDER,
     GROQ_API_KEY, GROQ_MODEL,
     OLLAMA_HOST, OLLAMA_MODEL,
-    ANTHROPIC_API_KEY, MODEL,
+    ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
 )
 from jarvis.core.memory import Memory
 
@@ -38,21 +39,30 @@ REGRAS GERAIS:
 CONTEXTO INJETADO AUTOMATICAMENTE:
 - [App: nome]          → aplicativo ativo
 - [Janela: titulo]     → título da janela
-- [Tela: texto]        → texto detectado na tela (OCR)
+- [Tela: texto]        → texto OCR da tela (providers sem visão multimodal)
+- [Visão: modo]        → como a visão está funcionando nesta mensagem
 - [Evento: desc]       → evento detectado pelo sistema
 - [Clipboard: txt]     → conteúdo copiado
 - [Atividade: tipo]    → o que o usuário está fazendo agora (CODING, GAMING, etc.)
 - [Perfil: info]       → o que já aprendi sobre este usuário em sessões anteriores
 
+VISÃO (MUITO IMPORTANTE):
+- Quando uma IMAGEM estiver anexada à mensagem: você está vendo o screenshot real da tela
+  → Descreva o que você vê quando perguntado diretamente
+  → Use o conteúdo visual para contextualizar sua resposta sem precisar mencionar a imagem explicitamente
+  → Se o usuário perguntar "você consegue ver minha tela?", confirme e descreva brevemente o que está visível
+- Quando [Tela: texto] estiver presente: texto extraído por OCR — use para entender o contexto
+- Quando [Visão: screenshot multimodal anexado]: imagem real disponível — você VÊ a tela
+
 COMPORTAMENTO POR ATIVIDADE:
 Quando [Atividade: GAMING — <jogo>]:
   - Usuário está jogando. Respostas MUITO curtas (1-2 frases máx).
-  - "me ajuda" / "como faço" → analise o que está visível na [Tela] no contexto do JOGO
+  - "me ajuda" / "como faço" → analise o que está visível na tela no contexto do JOGO
   - Pode dar dicas, estratégias, mecânicas — seja útil para o jogo
   - Não assuma que é pergunta de programação só porque você é assistente técnico
 
 Quando [Atividade: CODING — <editor>]:
-  - Analise o código/erro visível na [Tela] antes de responder
+  - Analise o código/erro visível na tela antes de responder
   - "me ajuda" → sugira correção ou próximo passo com base na tela
   - Erros → explique causa e solução diretamente
 
@@ -66,13 +76,12 @@ Quando [Atividade: WRITING]:
   - Ajude com texto, gramática, estrutura de ideias.
 
 Quando [Atividade: UNKNOWN] ou ausente:
-  - Analise [App] e [Tela] para inferir o contexto e responder adequadamente.
+  - Analise [App] e a tela para inferir o contexto e responder adequadamente.
 
 USO DO PERFIL DO USUÁRIO:
 Quando receber [Perfil: ...]:
   - Use essas informações para personalizar a resposta naturalmente
   - Ex: se perfil diz "gosta de Python", priorize soluções em Python
-  - Ex: se perfil diz "joga Valorant", você já sabe o contexto do jogo
   - Não mencione o perfil explicitamente — apenas use-o
 
 PEDIDOS DE APRENDIZADO:
@@ -83,7 +92,7 @@ Quando o usuário dizer "lembra que", "anota que", "guarda que" ou similar:
 PEDIDOS DE AJUDA:
 O usuário pode pedir ajuda de muitas formas. Quando detectar qualquer pedido:
   1. Olhe [Atividade] — o que ele está fazendo?
-  2. Analise [Tela] nesse contexto
+  2. Analise a tela nesse contexto
   3. Dê resposta específica — NUNCA apenas "Como posso ajudar?"
 
 TRANSCRIÇÃO DE VOZ:
@@ -178,7 +187,7 @@ def _tools_to_openai_format(tools: List[Dict]) -> List[Dict]:
 class Agent:
     """
     Gerencia a conversa com o LLM e executa ferramentas.
-    Suporta Groq, Ollama e Anthropic via LLM_PROVIDER no .env
+    Suporta Anthropic (padrão), Groq e Ollama via LLM_PROVIDER no .env.
     """
 
     def __init__(self, memory: Memory):
@@ -193,18 +202,30 @@ class Agent:
     # ---------------------------------------------------------------- #
 
     def _init_client(self) -> None:
-        if self.provider == "groq":
+        if self.provider == "anthropic":
+            self._client = self._build_anthropic_client()
+            self._model = ANTHROPIC_MODEL
+        elif self.provider == "groq":
             self._client, self._model = self._build_groq_client()
         elif self.provider == "ollama":
             self._client, self._model = self._build_ollama_client()
-        elif self.provider == "anthropic":
-            self._client = self._build_anthropic_client()
-            self._model = MODEL
         else:
             raise ValueError(
                 f"LLM_PROVIDER inválido: '{self.provider}'. "
-                "Use 'groq', 'ollama' ou 'anthropic' no .env"
+                "Use 'anthropic', 'groq' ou 'ollama' no .env"
             )
+
+    def _build_anthropic_client(self):
+        if not ANTHROPIC_API_KEY:
+            raise ValueError(
+                "ANTHROPIC_API_KEY não definida no .env\n"
+                "Adicione: ANTHROPIC_API_KEY=sua_chave\n"
+                "Ou use LLM_PROVIDER=groq para o provider gratuito."
+            )
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        print(f"[Agent] Provider: Anthropic Claude  |  Modelo: {ANTHROPIC_MODEL}")
+        return client
 
     def _build_groq_client(self):
         if not GROQ_API_KEY:
@@ -232,29 +253,37 @@ class Agent:
         print(f"[Agent] Provider: Ollama  |  Modelo: {OLLAMA_MODEL}  |  {OLLAMA_HOST}")
         return client, OLLAMA_MODEL
 
-    def _build_anthropic_client(self):
-        if not ANTHROPIC_API_KEY:
-            raise ValueError(
-                "ANTHROPIC_API_KEY não definida. "
-                "Troque para LLM_PROVIDER=groq para usar sem custo."
-            )
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        print(f"[Agent] Provider: Anthropic  |  Modelo: {MODEL}")
-        return client
-
     # ---------------------------------------------------------------- #
     #  Interface pública                                                #
     # ---------------------------------------------------------------- #
 
     def chat(self, user_message: str, context: Optional[Dict[str, str]] = None) -> str:
         """Envia mensagem ao LLM e retorna resposta. Thread-safe."""
-        full_message = self._build_user_message(user_message, context)
+        t_start = time.perf_counter()
 
+        # Extrai screenshot_b64 do contexto (não deve ir no texto)
+        screenshot_b64: Optional[str] = None
+        if context:
+            screenshot_b64 = context.pop("screenshot_b64", None)
+
+        # Monta mensagem textual com contexto do sistema
+        full_message = self._build_user_message(user_message, context)
+        t_prompt = time.perf_counter()
+
+        # Chama o LLM
         if self.provider in ("groq", "ollama"):
             response_text = self._chat_openai_compatible(full_message)
         else:
-            response_text = self._chat_anthropic(full_message)
+            response_text = self._chat_anthropic(full_message, screenshot_b64=screenshot_b64)
+
+        t_llm = time.perf_counter()
+
+        # Log de performance
+        print(
+            f"[Perf] Montagem prompt: {(t_prompt - t_start)*1000:.0f}ms | "
+            f"LLM ({self.provider}): {(t_llm - t_prompt)*1000:.0f}ms | "
+            f"Total chat: {(t_llm - t_start)*1000:.0f}ms"
+        )
 
         self.memory.add_message("user", full_message)
         self.memory.add_message("assistant", response_text)
@@ -263,6 +292,7 @@ class Agent:
             "model": self._model,
             "user": user_message[:200],
             "response": response_text[:200],
+            "has_vision": screenshot_b64 is not None,
         })
         return response_text
 
@@ -341,18 +371,43 @@ class Agent:
         return response.choices[0].message.content or ""
 
     # ---------------------------------------------------------------- #
-    #  Implementação Anthropic                                          #
+    #  Implementação Anthropic (com suporte a visão multimodal)        #
     # ---------------------------------------------------------------- #
 
-    def _chat_anthropic(self, user_message: str) -> str:
-        """Conversa via Anthropic Claude."""
+    def _chat_anthropic(
+        self,
+        user_message: str,
+        screenshot_b64: Optional[str] = None,
+    ) -> str:
+        """
+        Conversa via Anthropic Claude.
+        Se screenshot_b64 fornecido, envia como imagem JPEG na mensagem (visão multimodal).
+        """
         import anthropic
 
         messages = list(self.memory.get_messages_for_api())
-        messages.append({"role": "user", "content": user_message})
+
+        # Constrói conteúdo do usuário — texto + imagem opcional
+        if screenshot_b64:
+            user_content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": screenshot_b64,
+                    },
+                },
+                {"type": "text", "text": user_message},
+            ]
+            print("[Vision] Screenshot enviado ao Claude como imagem multimodal.")
+        else:
+            user_content = user_message
+
+        messages.append({"role": "user", "content": user_content})
 
         response = self._client.messages.create(
-            model=MODEL,
+            model=self._model,
             max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=messages,
@@ -390,7 +445,7 @@ class Agent:
                 {"role": "user", "content": tool_results},
             ]
             response = self._client.messages.create(
-                model=MODEL,
+                model=self._model,
                 max_tokens=1024,
                 system=SYSTEM_PROMPT,
                 messages=current_messages,
@@ -443,21 +498,25 @@ class Agent:
 
     def _build_user_message(self, text: str, context: Optional[Dict[str, str]]) -> str:
         """Monta mensagem do usuário com contexto do sistema."""
+        if not context:
+            return text
+
         parts = []
-        if context:
-            if context.get("app_name"):
-                parts.append(f"[App: {context['app_name']}]")
-            if context.get("window_title") and context["window_title"] != context.get("app_name"):
-                parts.append(f"[Janela: {context['window_title'][:80]}]")
-            if context.get("screen_text"):
-                parts.append(f"[Tela: {context['screen_text'][:500]}]")
-            if context.get("proactive_event"):
-                parts.append(f"[Evento: {context['proactive_event']}]")
-            if context.get("clipboard") and len(context.get("clipboard", "")) > 5:
-                parts.append(f"[Clipboard: {context['clipboard'][:100]}]")
+        if context.get("app_name"):
+            parts.append(f"[App: {context['app_name']}]")
+        if context.get("window_title") and context["window_title"] != context.get("app_name"):
+            parts.append(f"[Janela: {context['window_title'][:80]}]")
+        if context.get("screen_text"):
+            parts.append(f"[Tela: {context['screen_text'][:500]}]")
+        if context.get("vision_mode"):
+            parts.append(f"[Visão: {context['vision_mode']}]")
+        if context.get("proactive_event"):
+            parts.append(f"[Evento: {context['proactive_event']}]")
+        if context.get("clipboard") and len(context.get("clipboard", "")) > 5:
+            parts.append(f"[Clipboard: {context['clipboard'][:100]}]")
         if context.get("activity"):
-                parts.append(f"[Atividade: {context['activity']}]")
+            parts.append(f"[Atividade: {context['activity']}]")
         if context.get("profile"):
-                parts.append(f"[Perfil: {context['profile']}]")
+            parts.append(f"[Perfil: {context['profile']}]")
 
         return ("\n".join(parts) + "\n\n" + text) if parts else text
