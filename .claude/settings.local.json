@@ -1,7 +1,27 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(python -c \"from jarvis.modes.realtime import RealtimeMode; from jarvis.observer.observer import Observer; from jarvis.observer.decision import DecisionEngine; from jarvis.observer.events import EventType; print\\(''OK''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python -m jarvis --mode realtime)",
+      "Read(//c/Users/gomes/.claude/**)",
+      "Bash(PROJECT_ROOT=C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai echo '=== .env ===')",
+      "Read(//c/Users/gomes/OneDrive/Documentos/Projetos/project_ai/$PROJECT_ROOT/**)",
+      "Read(//c/Users/gomes/OneDrive/Documentos/Projetos/project_ai/**)",
+      "Read(//c/Users/gomes/OneDrive/Documentos/Projetos/project_ai/$PROJECT_ROOT/jarvis/**)",
+      "Bash(xargs -I{} tail -10 {})",
+      "Bash(pip show:*)",
+      "Bash(mkdir -p \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/commit\")",
+      "Bash(mkdir -p \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-audio\")",
+      "Bash(mkdir -p \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-vision\")",
+      "Bash(mkdir -p \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-learning\")",
+      "Bash(mkdir -p \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-visualize\")",
+      "Bash(cp \"C:/Users/gomes/.claude/skills/commit/SKILL.md\" \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/commit/SKILL.md\")",
+      "Bash(cp \"C:/Users/gomes/.claude/skills/jarvis-audio/SKILL.md\" \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-audio/SKILL.md\")",
+      "Bash(cp \"C:/Users/gomes/.claude/skills/jarvis-vision/SKILL.md\" \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-vision/SKILL.md\")",
+      "Bash(cp \"C:/Users/gomes/.claude/skills/jarvis-learning/SKILL.md\" \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-learning/SKILL.md\")",
+      "Bash(cp \"C:/Users/gomes/.claude/skills/jarvis-visualize/SKILL.md\" \"C:/Users/gomes/OneDrive/Documentos/Projetos/project_ai/.claude/skills/jarvis-visualize/SKILL.md\")"
     ]
   }
 }
