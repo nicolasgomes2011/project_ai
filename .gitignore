@@ -41,3 +41,6 @@ Desktop.ini
 # Google OAuth (credenciais — nunca versionar)
 credentials.json
 token.json
+
+# Claude Code — configurações locais de máquina
+.claude/settings.local.json
