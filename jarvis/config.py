@@ -88,6 +88,5 @@ PROACTIVITY_COOLDOWN: int = int(os.getenv("PROACTIVITY_COOLDOWN", "120"))
 PROFILE_PATH: Path = LOG_DIR / "user_profile.json"
 SESSION_SUMMARY_MIN_EXCHANGES: int = int(os.getenv("SESSION_SUMMARY_MIN_EXCHANGES", "5"))
 
-# --- Google Docs (modo anotação) ---
-GDOCS_CREDENTIALS_PATH: str = os.getenv("GDOCS_CREDENTIALS_PATH", "credentials.json")
-GDOCS_TOKEN_PATH: str = os.getenv("GDOCS_TOKEN_PATH", "token.json")
+# --- Modo Anotação ---
+NOTES_DIR: Path = LOG_DIR  # Notas salvas junto com os logs de sessão

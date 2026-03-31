@@ -1,10 +1,11 @@
 """Modo Realtime — voz + visão + proatividade em tempo real."""
 
 import asyncio
+import subprocess
 import time
-import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Set
 
 from rich.console import Console
@@ -21,7 +22,6 @@ from jarvis.processing.stt import STTProcessor
 from jarvis.processing.tts import TTSProcessor
 from jarvis.observer.observer import Observer
 from jarvis.observer.decision import DecisionEngine, Action
-from jarvis.integrations.gdocs import GoogleDocsClient
 import jarvis.config as cfg
 
 
@@ -82,11 +82,9 @@ class RealtimeMode:
         # Estado — modo anotação
         self._annotation_mode: bool = False
         self._annotation_buffer: List[str] = []
-        self._annotation_doc_id: str = ""
-        self._annotation_doc_url: str = ""
+        self._annotation_file: Optional[Path] = None
         self._last_annotation_write: float = 0.0
         self._last_utterance_time: float = time.time()
-        self._gdocs: Optional[GoogleDocsClient] = None  # lazy init
 
         # Thread pool para tarefas CPU-bound
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="jarvis")
@@ -229,71 +227,45 @@ class RealtimeMode:
     # ------------------------------------------------------------------ #
 
     async def _start_annotation(self) -> None:
-        """Ativa modo anotação: autentica, cria Google Doc e confirma por voz."""
-        loop = asyncio.get_event_loop()
+        """Ativa modo anotação: cria arquivo .txt e confirma por voz."""
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self._annotation_file = cfg.LOG_DIR / f"notas_{timestamp}.txt"
 
-        try:
-            # Lazy init do cliente Google Docs
-            if self._gdocs is None:
-                self._gdocs = GoogleDocsClient(
-                    credentials_path=cfg.GDOCS_CREDENTIALS_PATH,
-                    token_path=cfg.GDOCS_TOKEN_PATH,
-                )
+        # Escreve cabeçalho
+        header = f"Notas Jarvis — {datetime.now().strftime('%d/%m/%Y %H:%M')}\n{'='*50}\n\n"
+        self._annotation_file.write_text(header, encoding="utf-8")
 
-            console.print("[yellow][Anotação] Autenticando no Google Docs...[/yellow]")
-            await loop.run_in_executor(self._executor, self._gdocs.authenticate)
+        # Ativa o modo
+        self._annotation_mode = True
+        self._annotation_buffer = []
+        self._last_annotation_write = time.time()
+        self._last_utterance_time = time.time()
 
-            # Cria documento com título baseado na data/hora atual
-            title = f"Notas Jarvis — {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-            self._annotation_doc_id = await loop.run_in_executor(
-                self._executor, self._gdocs.create_document, title
-            )
-            self._annotation_doc_url = self._gdocs.get_document_url(self._annotation_doc_id)
-
-            # Ativa o modo
-            self._annotation_mode = True
-            self._annotation_buffer = []
-            self._last_annotation_write = time.time()
-            self._last_utterance_time = time.time()
-
-            console.print(
-                f"[green][Anotação] Modo ativado![/green] Doc: {self._annotation_doc_url}"
-            )
-            await self.tts.speak_async("Modo anotação ativado. Pode falar à vontade!")
-
-        except FileNotFoundError as e:
-            console.print(f"[red][Anotação] {e}[/red]")
-            await self.tts.speak_async(
-                "Não consegui ativar o modo anotação. "
-                "O arquivo de credenciais do Google não foi encontrado."
-            )
-        except Exception as e:
-            console.print(f"[red][Anotação] Erro ao ativar: {e}[/red]")
-            await self.tts.speak_async("Ocorreu um erro ao ativar o modo anotação.")
+        console.print(
+            f"[green][Anotação] Modo ativado![/green] Arquivo: {self._annotation_file}"
+        )
+        await self.tts.speak_async("Modo anotação ativado. Pode falar à vontade!")
 
     async def _stop_annotation(self) -> None:
-        """Desativa modo anotação: faz flush final e confirma por voz."""
+        """Desativa modo anotação: faz flush final, abre Bloco de Notas e confirma por voz."""
         # Flush do que sobrou no buffer
         if self._annotation_buffer:
             await self._flush_annotation_buffer()
 
         self._annotation_mode = False
-        doc_url = self._annotation_doc_url
-        self._annotation_doc_id = ""
-        self._annotation_doc_url = ""
+        note_file = self._annotation_file
+        self._annotation_file = None
         self._annotation_buffer = []
 
-        console.print(f"[yellow][Anotação] Modo desativado. Notas em: {doc_url}[/yellow]")
-        await self.tts.speak_async(
-            f"Modo anotação desativado. Suas notas foram salvas."
-        )
+        console.print(f"[yellow][Anotação] Modo desativado. Notas em: {note_file}[/yellow]")
+        await self.tts.speak_async("Modo anotação desativado. Suas notas foram salvas.")
 
-        if doc_url:
-            webbrowser.open(doc_url)
+        if note_file and note_file.exists():
+            subprocess.Popen(["notepad.exe", str(note_file)])
 
     async def _flush_annotation_buffer(self) -> None:
-        """Processa utterances acumuladas via LLM e grava no Google Doc."""
-        if not self._annotation_buffer:
+        """Processa utterances acumuladas via LLM e grava no arquivo de notas."""
+        if not self._annotation_buffer or self._annotation_file is None:
             return
 
         utterances = self._annotation_buffer[:]
@@ -314,17 +286,22 @@ class RealtimeMode:
             )
 
             timestamp = datetime.now().strftime("%H:%M")
-            block = f"\n[{timestamp}]\n{formatted}\n"
+            block = f"[{timestamp}]\n{formatted}\n\n"
 
-            await loop.run_in_executor(
-                self._executor, self._gdocs.append_text, self._annotation_doc_id, block
+            # Append ao arquivo (thread-safe via executor)
+            def _write_to_file():
+                with open(self._annotation_file, "a", encoding="utf-8") as f:
+                    f.write(block)
+
+            await loop.run_in_executor(self._executor, _write_to_file)
+            console.print(
+                f"[green][Anotação] {len(utterances)} fala(s) gravada(s) no arquivo.[/green]"
             )
-            console.print(f"[green][Anotação] {len(utterances)} fala(s) gravada(s) no Doc.[/green]")
 
         except Exception as e:
             # Devolve utterances ao buffer para não perder
             self._annotation_buffer = utterances + self._annotation_buffer
-            console.print(f"[red][Anotação] Erro ao gravar no Doc: {e}[/red]")
+            console.print(f"[red][Anotação] Erro ao gravar no arquivo: {e}[/red]")
 
     # ------------------------------------------------------------------ #
     #  Aprendizado explícito                                               #
