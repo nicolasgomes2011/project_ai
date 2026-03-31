@@ -1,7 +1,6 @@
 """Modo Realtime — voz + visão + proatividade em tempo real."""
 
 import asyncio
-import random
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
@@ -35,22 +34,7 @@ ANNOTATION_SILENCE_TIMEOUT = 300   # 5 minutos sem fala → encerra automaticame
 ANNOTATION_BATCH_SIZE      = 5     # utterances acumuladas antes de gravar no Doc
 ANNOTATION_BATCH_INTERVAL  = 60.0  # segundos entre writes forçados
 
-# --- Wake words e frases de acionamento ---
-# Wake words: prefixo é removido; o restante vira o comando
-WAKE_WORDS = ["ei, jarvis", "ei jarvis", "jarvis"]
-# Trigger phrases: texto completo é passado ao agente
-TRIGGER_PHRASES = ["preciso de ajuda", "não sei como"]
-
-# --- Frases de escuta ---
-GREETING_PHRASE = "Olá, estou ouvindo."
-LISTENING_PHRASES = [
-    "Deseja algo mais?",
-    "Estou ouvindo.",
-    "Pode falar.",
-    "Tem mais alguma coisa?",
-    "Em que mais posso ajudar?",
-    "Diga.",
-]
+GREETING_PHRASE = "Olá! Estou pronto."
 
 
 class RealtimeMode:
@@ -233,19 +217,12 @@ class RealtimeMode:
             if should_flush:
                 await self._flush_annotation_buffer()
 
-        # --- Wake word: só responde se acionado ---
-        triggered, text_to_respond = self._check_wake_trigger(text)
-        if not triggered:
-            console.print(f"[dim](não acionado): {text}[/dim]")
-            self._status_line = "Pronto"
-            return
-
         # --- Detecção de comando de aprendizado explícito ---
-        if await self._check_learn_command(text_to_respond):
+        if await self._check_learn_command(text):
             return  # Já tratado, não repassa ao agente
 
-        # Jarvis responde normalmente independente do modo anotação
-        await self._respond(text_to_respond)
+        # Toda fala vai direto ao agente — sem wake word
+        await self._respond(text)
 
     # ------------------------------------------------------------------ #
     #  Modo Anotação                                                       #
@@ -387,34 +364,6 @@ class RealtimeMode:
         return True
 
     # ------------------------------------------------------------------ #
-    #  Detecção de acionamento (wake word)                                #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _check_wake_trigger(text: str) -> tuple:
-        """
-        Verifica se o texto contém uma frase de acionamento.
-
-        Retorna (acionado: bool, texto_limpo: str).
-        - Wake words (ex: "jarvis"): prefixo removido, restante vira o comando.
-        - Trigger phrases (ex: "preciso de ajuda"): texto completo preservado.
-        """
-        text_lower = text.strip().lower()
-
-        # Wake words no início: strip do prefixo
-        for wake_word in WAKE_WORDS:
-            if text_lower.startswith(wake_word):
-                remainder = text[len(wake_word):].lstrip(" ,.:!").strip()
-                return True, remainder if remainder else text.strip()
-
-        # Frases de contexto: mantém texto completo
-        for phrase in TRIGGER_PHRASES:
-            if phrase in text_lower:
-                return True, text.strip()
-
-        return False, text.strip()
-
-    # ------------------------------------------------------------------ #
     #  Geração de resposta                                                 #
     # ------------------------------------------------------------------ #
 
@@ -510,7 +459,6 @@ class RealtimeMode:
         finally:
             self._processing = False
             self._status_line = "Pronto"
-            await self.tts.speak_async(random.choice(LISTENING_PHRASES))
 
     # ------------------------------------------------------------------ #
     #  Observer loop                                                       #

@@ -30,7 +30,7 @@ GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 # Modelos disponíveis no free tier:
 #   llama-3.1-8b-instant     → mais rápido, ideal para voz (14k req/dia)
 #   llama-3.3-70b-versatile  → melhor qualidade (6k req/dia)
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # --- Ollama (local) ---
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -65,7 +65,7 @@ VISION_JPEG_QUALITY: int = int(os.getenv("VISION_JPEG_QUALITY", "50"))
 VISION_MAX_WIDTH: int = int(os.getenv("VISION_MAX_WIDTH", "1280"))
 
 # --- STT ---
-WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL", "small")
+WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL", "medium")
 WHISPER_LANGUAGE: str = "pt" if LANGUAGE == "pt" else None  # None = auto-detect
 
 # Filtros de qualidade do Whisper (reduz alucinações e ruído de fundo)

@@ -44,7 +44,11 @@ class DecisionEngine:
 
         # Média prioridade: só sugere se evento relevante
         if event.priority == Priority.MEDIUM:
-            if event.type in (EventType.STUCK_DETECTED, EventType.IDE_OPEN):
+            if event.type in (
+                EventType.STUCK_DETECTED,
+                EventType.IDE_OPEN,
+                EventType.CONTENT_AWARENESS,
+            ):
                 return Action.SUGGEST
 
         # Baixa prioridade: ignora

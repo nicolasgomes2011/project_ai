@@ -18,6 +18,7 @@ class EventType(str, Enum):
     DEBUG_MODE = "debug_mode"             # Modo debug ativo
     CONFUSION_SIGNAL = "confusion_signal" # Usuário demonstrou dúvida/confusão
     TECHNICAL_CONTENT = "technical_content"  # Conteúdo técnico complexo
+    CONTENT_AWARENESS = "content_awareness"  # Novo conteúdo relevante na tela (YouTube, artigo, etc.)
 
     # Eventos do sistema
     KILL_SWITCH = "kill_switch"           # Desligar tudo
