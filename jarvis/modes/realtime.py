@@ -1,12 +1,16 @@
 """Modo Realtime — voz + visão + proatividade em tempo real."""
 
 import asyncio
+import difflib
+import json
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
@@ -35,6 +39,16 @@ ANNOTATION_BATCH_SIZE      = 5     # utterances acumuladas antes de gravar no Do
 ANNOTATION_BATCH_INTERVAL  = 60.0  # segundos entre writes forçados
 
 GREETING_PHRASE = "Olá! Estou pronto."
+
+# Regex para remover pontuação antes de comparar wake word
+_PUNCT_RE = re.compile(r"[^\w\s]")
+
+
+class JarvisState(Enum):
+    SLEEPING  = "sleeping"   # Ignora tudo exceto wake word
+    LISTENING = "listening"  # Wake word detectada, aguardando comando
+    ENGAGED   = "engaged"    # Aceita comandos sem repetir wake word
+    EXECUTING = "executing"  # Executando ação (LLM/capability ativa)
 
 
 class RealtimeMode:
@@ -92,6 +106,19 @@ class RealtimeMode:
         # Kill switch
         self._kill_event = asyncio.Event()
 
+        # ── State machine ──────────────────────────────────────────────
+        self._state: JarvisState = JarvisState.SLEEPING
+        self._engaged_timer_task: Optional[asyncio.Task] = None
+
+        # ── TTS cooldown — ignora áudio capturado logo após Jarvis falar ──
+        self._tts_cooldown_until: float = 0.0
+
+        # ── Log de diagnóstico por utterance (JSONL) ───────────────────
+        self._utterance_log_path: Path = (
+            cfg.LOG_DIR
+            / f"utterances_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.jsonl"
+        )
+
         # Rastreia tasks de utterance para cancelamento limpo no shutdown
         # (tasks criadas por asyncio.run_coroutine_threadsafe no VAD thread)
         self._pending_utterance_tasks: Set[asyncio.Task] = set()
@@ -120,6 +147,8 @@ class RealtimeMode:
             self.audio_sensor.start()
             self._mic_active = True
             await self.tts.speak_async(GREETING_PHRASE)
+            # Evita que o próprio "Olá!" seja capturado como utterance
+            self._tts_cooldown_until = time.time() + cfg.TTS_COOLDOWN_S
 
         # Inicia visão em background
         if self.vision_sensor:
@@ -163,64 +192,229 @@ class RealtimeMode:
     # ------------------------------------------------------------------ #
 
     async def _on_utterance(self, audio_bytes: bytes) -> None:
-        """Chamado quando uma utterance completa é detectada."""
-        if self._processing:
-            return  # Ignora nova fala enquanto processa
+        """
+        Chamado quando uma utterance completa é detectada pelo VAD.
+        Implementa state machine: só encaminha ao agente quando no estado correto.
+        """
+        t_total = time.perf_counter()
 
-        self._speech_detected = True
-        self.tts.stop()  # Interrompe TTS se estiver falando
+        diag: dict = {
+            "timestamp": datetime.now().isoformat(),
+            "state_before": self._state.value,
+            "state_after": None,
+            "transcript": None,
+            "wake_word_detected": False,
+            "command_text": None,
+            "in_tts_cooldown": False,
+            "called_llm": False,
+            "ignored": False,
+            "ignore_reason": None,
+            "stt_ms": 0.0,
+            "total_ms": 0.0,
+        }
 
-        self._status_line = "Transcrevendo..."
-        self.observer.reset_cooldown()
+        try:
+            # ── 1. Cooldown pós-TTS — rejeita áudio logo após Jarvis falar ──
+            if time.time() < self._tts_cooldown_until:
+                diag["ignored"] = True
+                diag["in_tts_cooldown"] = True
+                diag["ignore_reason"] = "tts_cooldown"
+                return
 
-        # STT em thread pool (não bloqueia o loop asyncio)
-        t_stt_start = time.perf_counter()
-        loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(self._executor, self.stt.transcribe, audio_bytes)
-        stt_ms = (time.perf_counter() - t_stt_start) * 1000
-        self._speech_detected = False
+            self._speech_detected = True
+            self.tts.stop()  # Barge-out: interrompe TTS se estiver falando
 
-        if text:
-            print(f"[Perf] STT: {stt_ms:.0f}ms | '{text[:60]}{'...' if len(text)>60 else ''}'")
-
-        if not text or len(text.strip()) < 2:
-            self._status_line = "Pronto"
-            return
-
-        self._last_transcript = text
-        console.print(f"\n[cyan]Você:[/cyan] {text}")
-
-        # --- Detecção de trigger de anotação (antes de responder) ---
-        text_lower = text.strip().lower()
-
-        if any(trigger in text_lower for trigger in ANNOTATION_ACTIVATE):
-            if not self._annotation_mode:
-                await self._start_annotation()
-            return  # Não repassa ao agente normal
-
-        if any(trigger in text_lower for trigger in ANNOTATION_DEACTIVATE):
-            if self._annotation_mode:
-                await self._stop_annotation()
-            return  # Não repassa ao agente normal
-
-        # --- Modo anotação ativo: acumula utterance ---
-        if self._annotation_mode:
-            self._annotation_buffer.append(text)
-            self._last_utterance_time = time.time()
-
-            should_flush = (
-                len(self._annotation_buffer) >= ANNOTATION_BATCH_SIZE
-                or (time.time() - self._last_annotation_write) >= ANNOTATION_BATCH_INTERVAL
+            # ── 2. STT ──────────────────────────────────────────────────
+            self._status_line = "Transcrevendo..."
+            t_stt = time.perf_counter()
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(
+                self._executor, self.stt.transcribe, audio_bytes
             )
-            if should_flush:
-                await self._flush_annotation_buffer()
+            diag["stt_ms"] = (time.perf_counter() - t_stt) * 1000
 
-        # --- Detecção de comando de aprendizado explícito ---
-        if await self._check_learn_command(text):
-            return  # Já tratado, não repassa ao agente
+            if not text or len(text.strip()) < 2:
+                diag["ignored"] = True
+                diag["ignore_reason"] = "empty_transcript"
+                return
 
-        # Toda fala vai direto ao agente — sem wake word
-        await self._respond(text)
+            diag["transcript"] = text
+            self._last_transcript = text
+            text_lower = text.strip().lower()
+            console.print(f"\n[cyan]Você:[/cyan] {text}")
+
+            # ── 3. Modo anotação — controle e acúmulo (sem chamar LLM) ──
+            if any(t in text_lower for t in ANNOTATION_ACTIVATE):
+                if not self._annotation_mode:
+                    await self._start_annotation()
+                diag["ignored"] = True
+                diag["ignore_reason"] = "annotation_activate_command"
+                return
+
+            if self._annotation_mode:
+                if any(t in text_lower for t in ANNOTATION_DEACTIVATE):
+                    await self._stop_annotation()
+                    diag["ignore_reason"] = "annotation_deactivate_command"
+                else:
+                    self._annotation_buffer.append(text)
+                    self._last_utterance_time = time.time()
+                    should_flush = (
+                        len(self._annotation_buffer) >= ANNOTATION_BATCH_SIZE
+                        or (time.time() - self._last_annotation_write) >= ANNOTATION_BATCH_INTERVAL
+                    )
+                    if should_flush:
+                        await self._flush_annotation_buffer()
+                    diag["ignore_reason"] = "annotation_mode_accumulating"
+                diag["ignored"] = True
+                return
+
+            # ── 4. Aprendizado explícito ─────────────────────────────────
+            if await self._check_learn_command(text):
+                diag["ignored"] = True
+                diag["ignore_reason"] = "learn_command"
+                return
+
+            # ── 5. State machine ─────────────────────────────────────────
+            state = self._state
+
+            if state == JarvisState.SLEEPING:
+                if not cfg.WAKE_WORD_REQUIRED:
+                    # Modo legado: toda fala vai ao agente (WAKE_WORD_REQUIRED=false no .env)
+                    diag["command_text"] = text
+                    diag["called_llm"] = True
+                    await self._process_command(text)
+                else:
+                    found, remainder = self._check_wake_word(text)
+                    if not found:
+                        diag["ignored"] = True
+                        diag["ignore_reason"] = "no_wake_word"
+                        print(f"[State] Ignorado (sleeping, sem wake word): '{text[:60]}'")
+                        return
+                    diag["wake_word_detected"] = True
+                    self._transition_to(JarvisState.ENGAGED)
+                    if remainder:
+                        diag["command_text"] = remainder
+                        diag["called_llm"] = True
+                        await self._process_command(remainder)
+                    else:
+                        # Só wake word: confirma e aguarda próximo comando
+                        diag["command_text"] = None
+                        await self._acknowledge()
+
+            elif state in (JarvisState.LISTENING, JarvisState.ENGAGED):
+                found, remainder = self._check_wake_word(text)
+                if found:
+                    diag["wake_word_detected"] = True
+                    command = remainder or None
+                else:
+                    command = text
+                diag["command_text"] = command
+                self._reset_engaged_timer()
+                if command:
+                    diag["called_llm"] = True
+                    await self._process_command(command)
+                else:
+                    await self._acknowledge()
+
+            elif state == JarvisState.EXECUTING:
+                diag["ignored"] = True
+                diag["ignore_reason"] = "state_executing"
+
+        finally:
+            self._speech_detected = False
+            self._status_line = "Pronto"
+            diag["state_after"] = self._state.value
+            diag["total_ms"] = (time.perf_counter() - t_total) * 1000
+            self._log_utterance(diag)
+
+    # ------------------------------------------------------------------ #
+    #  State machine — helpers                                            #
+    # ------------------------------------------------------------------ #
+
+    def _check_wake_word(self, text: str) -> Tuple[bool, str]:
+        """
+        Detecta wake word no início do texto (exact + fuzzy).
+        Retorna (encontrou, texto_restante_sem_wake_word).
+        """
+        words = _PUNCT_RE.sub(" ", text.strip().lower()).split()
+        if not words:
+            return False, text.strip()
+
+        first = words[0]
+
+        # Exact match entre o primeiro token e qualquer alias
+        for alias in cfg.WAKE_WORD_ALIASES:
+            if first == alias:
+                return True, " ".join(words[1:])
+
+        # Fuzzy match — SequenceMatcher é stdlib, sem dependências extras
+        best = max(
+            difflib.SequenceMatcher(None, first, alias).ratio()
+            for alias in cfg.WAKE_WORD_ALIASES
+        )
+        if best >= cfg.WAKE_WORD_FUZZY_THRESHOLD:
+            print(f"[WakeWord] fuzzy score={best:.2f} token='{first}'")
+            return True, " ".join(words[1:])
+
+        return False, text.strip()
+
+    def _transition_to(self, new_state: JarvisState) -> None:
+        """Troca de estado com log."""
+        if self._state == new_state:
+            return
+        console.print(
+            f"[dim][State] {self._state.value} → {new_state.value}[/dim]"
+        )
+        self._state = new_state
+
+    def _reset_engaged_timer(self) -> None:
+        """Reinicia o timer que volta para SLEEPING após ENGAGED_TIMEOUT_S."""
+        if self._engaged_timer_task and not self._engaged_timer_task.done():
+            self._engaged_timer_task.cancel()
+        loop = asyncio.get_event_loop()
+        self._engaged_timer_task = loop.create_task(
+            self._engaged_timeout_coro(), name="engaged-timeout"
+        )
+
+    async def _engaged_timeout_coro(self) -> None:
+        """Volta para SLEEPING depois do timeout de inatividade."""
+        try:
+            await asyncio.sleep(cfg.ENGAGED_TIMEOUT_S)
+            if self._state == JarvisState.ENGAGED:
+                self._transition_to(JarvisState.SLEEPING)
+                console.print(
+                    f"[dim][State] Timeout de {cfg.ENGAGED_TIMEOUT_S:.0f}s — dormindo[/dim]"
+                )
+        except asyncio.CancelledError:
+            pass
+
+    async def _acknowledge(self) -> None:
+        """Resposta mínima de confirmação quando só a wake word é dita."""
+        self._status_line = "Ouvindo..."
+        await self.tts.speak_async("Estou ouvindo.")
+        self._tts_cooldown_until = time.time() + cfg.TTS_COOLDOWN_S
+        self._reset_engaged_timer()
+
+    async def _process_command(self, text: str) -> None:
+        """
+        Encaminha um comando limpo (sem wake word) para _respond.
+        Gerencia transição ENGAGED → EXECUTING → ENGAGED.
+        """
+        self._transition_to(JarvisState.EXECUTING)
+        try:
+            await self._respond(text)
+        finally:
+            if self._state == JarvisState.EXECUTING:
+                self._transition_to(JarvisState.ENGAGED)
+                self._reset_engaged_timer()
+
+    def _log_utterance(self, diag: dict) -> None:
+        """Grava diagnóstico da utterance em JSONL para debug."""
+        try:
+            with open(self._utterance_log_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(diag, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            print(f"[Log] Erro ao gravar diagnóstico: {exc}")
 
     # ------------------------------------------------------------------ #
     #  Modo Anotação                                                       #
@@ -430,6 +624,8 @@ class RealtimeMode:
             # TTS
             self._status_line = "Falando..."
             await self.tts.speak_async(response)
+            # Cooldown: descarta áudio capturado logo após Jarvis terminar de falar
+            self._tts_cooldown_until = time.time() + cfg.TTS_COOLDOWN_S
 
         except Exception as e:
             console.print(f"[red]Erro: {e}[/red]")
@@ -443,6 +639,11 @@ class RealtimeMode:
 
     async def _observer_loop(self) -> None:
         """Verifica proatividade a cada 10 segundos."""
+        if not cfg.PROACTIVITY_ENABLED:
+            # Proatividade desativada: espera kill switch sem fazer nada
+            await self._kill_event.wait()
+            return
+
         await asyncio.sleep(30)  # Aguarda 30s antes de começar a verificar
 
         while self._running:
@@ -507,6 +708,10 @@ class RealtimeMode:
 
         self._running = False
         self.tts.stop()
+
+        # Cancela timer de engaged se ativo
+        if self._engaged_timer_task and not self._engaged_timer_task.done():
+            self._engaged_timer_task.cancel()
 
         if self.audio_sensor:
             self.audio_sensor.stop()

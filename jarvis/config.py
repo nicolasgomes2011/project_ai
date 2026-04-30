@@ -6,6 +6,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    """
+    Lê variável de ambiente como booleano de forma segura.
+    Verdadeiro: '1', 'true', 'yes', 'y', 'on'  (case-insensitive)
+    Falso:      '0', 'false', 'no', 'n', 'off', ausente
+    """
+    val = os.getenv(name, "").strip().lower()
+    if val in ("1", "true", "yes", "y", "on"):
+        return True
+    if val in ("0", "false", "no", "n", "off", ""):
+        return False
+    return default
+
 # Diretórios
 BASE_DIR = Path(__file__).parent.parent
 LOG_DIR = BASE_DIR / "logs"
@@ -83,6 +97,26 @@ TTS_USE_EDGE: bool = os.getenv("JARVIS_TTS_EDGE", "True").lower() == "true"
 
 # --- Proatividade ---
 PROACTIVITY_COOLDOWN: int = int(os.getenv("PROACTIVITY_COOLDOWN", "120"))
+# False por padrão — base deve ser estável antes de ligar proatividade
+PROACTIVITY_ENABLED: bool = _env_bool("PROACTIVITY_ENABLED", False)
+
+# --- Wake word ---
+# True por padrão — Jarvis só responde quando chamado
+WAKE_WORD_REQUIRED: bool = _env_bool("WAKE_WORD_REQUIRED", True)
+# Aliases reconhecidos (variações de pronúncia comuns)
+WAKE_WORD_ALIASES: tuple = (
+    "jarvis", "jervis", "jarves", "jarviz", "jarwis", "jarvi", "jarv",
+)
+# Score mínimo de similaridade para aceitar fuzzy match (0.0–1.0)
+WAKE_WORD_FUZZY_THRESHOLD: float = float(os.getenv("WAKE_WORD_FUZZY_THRESHOLD", "0.75"))
+
+# --- State machine ---
+# Janela de tempo (segundos) em que o Jarvis aceita comandos sem repetir wake word
+ENGAGED_TIMEOUT_S: float = float(os.getenv("ENGAGED_TIMEOUT_S", "10.0"))
+
+# --- TTS cooldown ---
+# Segundos de silêncio forçado após o Jarvis terminar de falar
+TTS_COOLDOWN_S: float = float(os.getenv("TTS_COOLDOWN_S", "1.5"))
 
 # --- Aprendizado persistente ---
 PROFILE_PATH: Path = LOG_DIR / "user_profile.json"
