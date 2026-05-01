@@ -5,7 +5,8 @@ import time
 from typing import List, Dict, Optional
 
 from jarvis.observer.events import JarvisEvent, EventType, Priority
-from jarvis.config import PROACTIVITY_COOLDOWN, PROACTIVITY_ENABLED
+from jarvis.config import PROACTIVITY_COOLDOWN
+import jarvis.config as _cfg
 
 
 # ------------------------------------------------------------------ #
@@ -157,7 +158,7 @@ class Observer:
         """
         events: List[JarvisEvent] = []
 
-        if not PROACTIVITY_ENABLED:
+        if not _cfg.PROACTIVITY_ENABLED:
             return events
 
         if not self._can_be_proactive():

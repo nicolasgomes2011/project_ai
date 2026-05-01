@@ -11,14 +11,17 @@ def _env_bool(name: str, default: bool) -> bool:
     """
     Lê variável de ambiente como booleano de forma segura.
     Verdadeiro: '1', 'true', 'yes', 'y', 'on'  (case-insensitive)
-    Falso:      '0', 'false', 'no', 'n', 'off', ausente
+    Falso:      '0', 'false', 'no', 'n', 'off'
+    Ausente:    usa o valor de 'default'
     """
     val = os.getenv(name, "").strip().lower()
+    if not val:          # variável ausente → respeita o default
+        return default
     if val in ("1", "true", "yes", "y", "on"):
         return True
-    if val in ("0", "false", "no", "n", "off", ""):
+    if val in ("0", "false", "no", "n", "off"):
         return False
-    return default
+    return default       # valor desconhecido → respeita o default
 
 # Diretórios
 BASE_DIR = Path(__file__).parent.parent
@@ -105,8 +108,11 @@ PROACTIVITY_ENABLED: bool = _env_bool("PROACTIVITY_ENABLED", False)
 WAKE_WORD_REQUIRED: bool = _env_bool("WAKE_WORD_REQUIRED", True)
 # Aliases reconhecidos (variações de pronúncia comuns)
 WAKE_WORD_ALIASES: tuple = (
-    "jarvis", "jervis", "jarves", "jarviz", "jarwis", "jarvi", "jarv",
+    "jarvis", "jervis", "jarves", "jarviz", "jarwis",
 )
+# "jarvi" e "jarv" foram removidos: são curtos demais e causam falsos positivos
+# (ex: "jar" bate fuzzy 0.87 contra "jarv"). O fuzzy matching com threshold 0.75
+# ainda captura essas pronúncias via comparação com "jarvis" (score ≈ 0.91).
 # Score mínimo de similaridade para aceitar fuzzy match (0.0–1.0)
 WAKE_WORD_FUZZY_THRESHOLD: float = float(os.getenv("WAKE_WORD_FUZZY_THRESHOLD", "0.75"))
 
