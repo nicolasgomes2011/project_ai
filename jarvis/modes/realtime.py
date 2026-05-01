@@ -194,7 +194,13 @@ class RealtimeMode:
     async def _on_utterance(self, audio_bytes: bytes) -> None:
         """
         Chamado quando uma utterance completa é detectada pelo VAD.
-        Implementa state machine: só encaminha ao agente quando no estado correto.
+
+        Ordem de checagem (importa — não reordenar):
+          1. Cooldown pós-TTS
+          2. STT
+          3. Exceção de anotação ativa em sleeping  ← único bypass do gate
+          4. State gate (sleeping sem wake word → ignora tudo)
+          5. Só após passar o gate: anotação, aprendizado, LLM
         """
         t_total = time.perf_counter()
 
@@ -214,7 +220,7 @@ class RealtimeMode:
         }
 
         try:
-            # ── 1. Cooldown pós-TTS — rejeita áudio logo após Jarvis falar ──
+            # ── 1. Cooldown pós-TTS ──────────────────────────────────────
             if time.time() < self._tts_cooldown_until:
                 diag["ignored"] = True
                 diag["in_tts_cooldown"] = True
@@ -240,21 +246,17 @@ class RealtimeMode:
 
             diag["transcript"] = text
             self._last_transcript = text
-            text_lower = text.strip().lower()
             console.print(f"\n[cyan]Você:[/cyan] {text}")
 
-            # ── 3. Modo anotação — controle e acúmulo (sem chamar LLM) ──
-            if any(t in text_lower for t in ANNOTATION_ACTIVATE):
-                if not self._annotation_mode:
-                    await self._start_annotation()
-                diag["ignored"] = True
-                diag["ignore_reason"] = "annotation_activate_command"
-                return
-
-            if self._annotation_mode:
+            # ── 3. Exceção: anotação já ativa com Jarvis dormindo ────────
+            # Ativação inicial exige wake word (tratado no passo 5+).
+            # Mas continuação de anotação já iniciada NÃO exige — o usuário
+            # ativou validamente antes e está apenas continuando a falar.
+            if self._annotation_mode and self._state == JarvisState.SLEEPING:
+                text_lower = text.strip().lower()
                 if any(t in text_lower for t in ANNOTATION_DEACTIVATE):
                     await self._stop_annotation()
-                    diag["ignore_reason"] = "annotation_deactivate_command"
+                    diag["ignore_reason"] = "annotation_deactivate_while_sleeping"
                 else:
                     self._annotation_buffer.append(text)
                     self._last_utterance_time = time.time()
@@ -268,21 +270,16 @@ class RealtimeMode:
                 diag["ignored"] = True
                 return
 
-            # ── 4. Aprendizado explícito ─────────────────────────────────
-            if await self._check_learn_command(text):
-                diag["ignored"] = True
-                diag["ignore_reason"] = "learn_command"
-                return
-
-            # ── 5. State machine ─────────────────────────────────────────
+            # ── 4. State gate ────────────────────────────────────────────
+            # A partir daqui: nada acontece sem wake word quando sleeping.
+            # Inclui: ativação de anotação, aprendizado, TTS, LLM.
             state = self._state
+            text_to_process: Optional[str] = None
 
             if state == JarvisState.SLEEPING:
                 if not cfg.WAKE_WORD_REQUIRED:
-                    # Modo legado: toda fala vai ao agente (WAKE_WORD_REQUIRED=false no .env)
-                    diag["command_text"] = text
-                    diag["called_llm"] = True
-                    await self._process_command(text)
+                    # Modo legado (WAKE_WORD_REQUIRED=false no .env)
+                    text_to_process = text
                 else:
                     found, remainder = self._check_wake_word(text)
                     if not found:
@@ -292,33 +289,66 @@ class RealtimeMode:
                         return
                     diag["wake_word_detected"] = True
                     self._transition_to(JarvisState.ENGAGED)
-                    if remainder:
-                        diag["command_text"] = remainder
-                        diag["called_llm"] = True
-                        await self._process_command(remainder)
-                    else:
-                        # Só wake word: confirma e aguarda próximo comando
-                        diag["command_text"] = None
-                        await self._acknowledge()
+                    text_to_process = remainder or None   # None = só wake word
 
             elif state in (JarvisState.LISTENING, JarvisState.ENGAGED):
                 found, remainder = self._check_wake_word(text)
                 if found:
                     diag["wake_word_detected"] = True
-                    command = remainder or None
+                    text_to_process = remainder or None
                 else:
-                    command = text
-                diag["command_text"] = command
+                    text_to_process = text
                 self._reset_engaged_timer()
-                if command:
-                    diag["called_llm"] = True
-                    await self._process_command(command)
-                else:
-                    await self._acknowledge()
 
             elif state == JarvisState.EXECUTING:
                 diag["ignored"] = True
                 diag["ignore_reason"] = "state_executing"
+                return
+
+            # ── 4a. Apenas wake word, sem comando ────────────────────────
+            if text_to_process is None:
+                diag["command_text"] = None
+                await self._acknowledge()
+                return
+
+            diag["command_text"] = text_to_process
+            proc_lower = text_to_process.strip().lower()
+
+            # ── 5. Ativação do modo anotação (após passar o gate) ────────
+            if any(t in proc_lower for t in ANNOTATION_ACTIVATE):
+                if not self._annotation_mode:
+                    await self._start_annotation()
+                diag["ignored"] = True
+                diag["ignore_reason"] = "annotation_activate_command"
+                return
+
+            # ── 6. Anotação ativa em engaged/listening (após gate) ───────
+            if self._annotation_mode:
+                if any(t in proc_lower for t in ANNOTATION_DEACTIVATE):
+                    await self._stop_annotation()
+                    diag["ignore_reason"] = "annotation_deactivate_command"
+                else:
+                    self._annotation_buffer.append(text_to_process)
+                    self._last_utterance_time = time.time()
+                    should_flush = (
+                        len(self._annotation_buffer) >= ANNOTATION_BATCH_SIZE
+                        or (time.time() - self._last_annotation_write) >= ANNOTATION_BATCH_INTERVAL
+                    )
+                    if should_flush:
+                        await self._flush_annotation_buffer()
+                    diag["ignore_reason"] = "annotation_mode_accumulating"
+                diag["ignored"] = True
+                return
+
+            # ── 7. Aprendizado explícito (após passar o gate) ────────────
+            if await self._check_learn_command(text_to_process):
+                diag["ignored"] = True
+                diag["ignore_reason"] = "learn_command"
+                return
+
+            # ── 8. LLM fallback ──────────────────────────────────────────
+            diag["called_llm"] = True
+            await self._process_command(text_to_process)
 
         finally:
             self._speech_detected = False

@@ -515,5 +515,216 @@ class TestProactivityDisabled(unittest.TestCase):
             self.assertGreater(len(events), 0)
 
 
+class TestStateGate(unittest.TestCase):
+    """
+    Verifica que o state gate bloqueia corretamente qualquer ação quando sleeping
+    sem wake word — incluindo annotation mode, learn commands e LLM.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        with patch("jarvis.config.LOG_DIR", self.tmp_dir):
+            self.mode = _make_mode(self.tmp_dir)
+        self.mode._utterance_log_path = self.tmp_dir / "utterances_test.jsonl"
+        self.loop = asyncio.new_event_loop()
+
+    def tearDown(self):
+        _cancel_engaged_timer(self.mode, self.loop)
+        self.loop.close()
+
+    def _run(self, coro):
+        return self.loop.run_until_complete(coro)
+
+    def _utterance(self, text):
+        with patch.object(self.mode.stt, "transcribe", return_value=text):
+            self._run(self.mode._on_utterance(_fake_audio()))
+
+    # ── Annotation activation must require wake word ──────────────────────
+
+    def test_sleeping_annotation_activate_without_wake_word_is_ignored(self):
+        """'ativar modo anotação' while sleeping must be ignored (no wake word)."""
+        self.mode._state = JarvisState.SLEEPING
+        self.mode._annotation_mode = False
+
+        self._utterance("ativar modo anotação")
+
+        self.assertFalse(self.mode._annotation_mode)  # Must NOT have activated
+        self.mode.tts.speak_async.assert_not_called()
+
+    def test_sleeping_annotation_activate_with_wake_word_works(self):
+        """'Jarvis ativar modo anotação' while sleeping must activate annotation."""
+        self.mode._state = JarvisState.SLEEPING
+        self.mode._annotation_mode = False
+
+        self._utterance("Jarvis ativar modo anotação")
+
+        self.assertTrue(self.mode._annotation_mode)  # Must have activated
+
+    def test_engaged_annotation_activate_works_without_repeating_wake_word(self):
+        """'ativar modo anotação' while engaged must activate without wake word."""
+        self.mode._state = JarvisState.ENGAGED
+        self.mode._annotation_mode = False
+
+        self._utterance("ativar modo anotação")
+
+        self.assertTrue(self.mode._annotation_mode)
+
+    # ── Learn command must require wake word ──────────────────────────────
+
+    def test_sleeping_learn_command_without_wake_word_is_ignored(self):
+        """'lembra que X' while sleeping must be ignored (no wake word)."""
+        self.mode._state = JarvisState.SLEEPING
+
+        with patch.object(self.mode, "_check_learn_command",
+                          new=AsyncMock(return_value=True)) as mock_learn:
+            self._utterance("lembra que eu uso Python")
+
+        # _check_learn_command must never be called while sleeping without wake word
+        mock_learn.assert_not_called()
+        self.mode.agent.chat.assert_not_called()
+
+    def test_sleeping_learn_command_with_wake_word_is_processed(self):
+        """'Jarvis lembra que X' must process the learn command."""
+        self.mode._state = JarvisState.SLEEPING
+
+        # The learn command handler saves to profile; we just need to confirm
+        # the pipeline is reached (agent NOT called, but learn command processed)
+        with patch.object(self.mode, "_check_learn_command",
+                          new=AsyncMock(return_value=True)) as mock_learn:
+            self._utterance("Jarvis lembra que eu uso Python")
+
+        mock_learn.assert_called_once()
+
+    # ── Annotation mode already active while sleeping ─────────────────────
+
+    def test_sleeping_annotation_active_accumulates_without_wake_word(self):
+        """
+        If annotation mode is already active and Jarvis is sleeping,
+        speech must be accumulated without requiring a new wake word.
+        Buffer may be flushed immediately if BATCH_INTERVAL has passed,
+        so we assert on file content rather than raw buffer length.
+        """
+        self.mode._state = JarvisState.SLEEPING
+        self.mode._annotation_mode = True
+        self.mode._annotation_file = self.tmp_dir / "notas_test.txt"
+        self.mode._annotation_file.write_text("", encoding="utf-8")
+        # Prevent immediate flush so text stays in buffer for simpler assertion
+        self.mode._last_annotation_write = time.time()
+
+        self._utterance("continuando a fala aqui")
+
+        # Text must have been buffered (flush not triggered because interval not reached)
+        self.assertIn("continuando a fala aqui", self.mode._annotation_buffer)
+        # State must remain sleeping — this is the key assertion
+        self.assertEqual(self.mode._state, JarvisState.SLEEPING)
+
+    def test_sleeping_annotation_active_deactivate_works_without_wake_word(self):
+        """Deactivation of an already-active annotation mode must work while sleeping."""
+        self.mode._state = JarvisState.SLEEPING
+        self.mode._annotation_mode = True
+        self.mode._annotation_file = self.tmp_dir / "notas_test.txt"
+        self.mode._annotation_file.write_text("header\n", encoding="utf-8")
+
+        self._utterance("desativar modo anotação")
+
+        self.assertFalse(self.mode._annotation_mode)
+
+    # ── LLM never called without wake word while sleeping ────────────────
+
+    def test_sleeping_no_wake_word_never_calls_llm(self):
+        """Any speech without wake word while sleeping must never reach the LLM."""
+        self.mode._state = JarvisState.SLEEPING
+
+        for speech in [
+            "que horas são",
+            "me ajuda",
+            "abre o spotify",
+            "lembra que eu prefiro Python",
+            "ativar modo anotação",
+            "como está o tempo",
+        ]:
+            self.mode.agent.chat.reset_mock()
+            self._utterance(speech)
+            self.mode.agent.chat.assert_not_called(), f"LLM called for: '{speech}'"
+
+    def test_sleeping_no_wake_word_never_calls_tts_for_response(self):
+        """Any speech without wake word while sleeping must not trigger TTS."""
+        self.mode._state = JarvisState.SLEEPING
+        self.mode.tts.speak_async.reset_mock()
+
+        self._utterance("me conta uma piada")
+
+        self.mode.tts.speak_async.assert_not_called()
+
+
+class TestStateGateWakeWordInline(unittest.TestCase):
+    """
+    Verifica o comportamento inline da wake word:
+    - "Jarvis" → acorda
+    - "Jarvis, que horas são?" → remove wake word e processa comando limpo
+    - "Jarvis ativar modo anotação" → ativa anotação
+    - "Ativar modo anotação" sem Jarvis → ignorado quando sleeping
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        with patch("jarvis.config.LOG_DIR", self.tmp_dir):
+            self.mode = _make_mode(self.tmp_dir)
+        self.mode._utterance_log_path = self.tmp_dir / "utterances_test.jsonl"
+        self.loop = asyncio.new_event_loop()
+
+    def tearDown(self):
+        _cancel_engaged_timer(self.mode, self.loop)
+        self.loop.close()
+
+    def _run(self, coro):
+        return self.loop.run_until_complete(coro)
+
+    def _utterance(self, text):
+        with patch.object(self.mode.stt, "transcribe", return_value=text):
+            self._run(self.mode._on_utterance(_fake_audio()))
+
+    def test_jarvis_alone_wakes_up(self):
+        self.mode._state = JarvisState.SLEEPING
+        self._utterance("Jarvis")
+        self.assertEqual(self.mode._state, JarvisState.ENGAGED)
+        self.mode.agent.chat.assert_not_called()
+
+    def test_jarvis_inline_command_removes_wake_word(self):
+        """'Jarvis, que horas são?' must send 'que horas são' to agent, not the full text."""
+        self.mode._state = JarvisState.SLEEPING
+        self._utterance("Jarvis que horas são")
+        self.mode.agent.chat.assert_called_once()
+        sent_text = self.mode.agent.chat.call_args[0][0]
+        self.assertNotIn("jarvis", sent_text.lower())
+        self.assertIn("que horas", sent_text.lower())
+
+    def test_jarvis_activate_annotation_works(self):
+        self.mode._state = JarvisState.SLEEPING
+        self._utterance("Jarvis ativar modo anotação")
+        self.assertTrue(self.mode._annotation_mode)
+        self.mode.agent.chat.assert_not_called()
+
+    def test_activate_annotation_without_jarvis_ignored(self):
+        self.mode._state = JarvisState.SLEEPING
+        self._utterance("ativar modo anotação")
+        self.assertFalse(self.mode._annotation_mode)
+        self.mode.agent.chat.assert_not_called()
+        self.mode.tts.speak_async.assert_not_called()
+
+    def test_ei_jarvis_not_recognized(self):
+        """
+        'ei Jarvis' must NOT activate because wake word is not the first token.
+        Known limitation: inline wake word only detected at start of utterance.
+        """
+        self.mode._state = JarvisState.SLEEPING
+        self._utterance("ei Jarvis me ajuda")
+        # Must remain sleeping — wake word not at start
+        self.mode.agent.chat.assert_not_called()
+        # Document the limitation explicitly in the test name and docstring
+
+
 if __name__ == "__main__":
     unittest.main()
